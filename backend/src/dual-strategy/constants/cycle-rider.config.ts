@@ -133,8 +133,8 @@ export const CYCLE_RIDER_CONFIG = {
       rsiReentryShort: 65, // For SHORT entry, RSI must still be > 65
       tpSl: {
         slAtrMultiple: 1.0,
-        tp1Type: 'fib_382', // 38.2% retracement
-        tp2Type: 'fib_618', // 61.8% retracement
+        tp1RR: 1.5, // 1.5 R:R (최적화: 피보나치 → R:R 기반)
+        tp2RR: 2.5, // 2.5 R:R (다른 Cycle Rider 전략과 일관성)
         useTrailing: false,
       },
     },

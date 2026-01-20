@@ -9,7 +9,7 @@ import { ChevronDown } from 'lucide-react';
 
 export function ActiveTradesPanel({ initialPositions }: { initialPositions: Position[] }) {
   const [positions, setPositions] = useState<Position[]>(initialPositions);
-  const [isOpen, setIsOpen] = useState(false); // Default: collapsed
+  const [isOpen, setIsOpen] = useState(true); // Default: expanded
   const { subscribe, unsubscribe } = useWebSocket();
 
   useEffect(() => {

@@ -7,6 +7,9 @@ import { CustomLoggerService } from '../../../common/logging/custom-logger.servi
 import { TradingSignal } from '../../interfaces/signal.interface';
 import { Candle } from '../../interfaces/candle.interface';
 import { MarketRegime } from '../../../entities/market-regime-history.entity';
+import { TradeDirection } from '../../../entities/trade.entity';
+import { HOUR_SWING_CONFIG } from '../../constants/hour-swing.config';
+import { Indicators } from '../../utils/indicators';
 
 /**
  * Hour Swing Signal Service
@@ -57,6 +60,37 @@ export class HourSwingSignalService {
         'HourSwingSignalService',
       );
 
+      // ========== NEW: ATR Filter ==========
+      const filters = (HOUR_SWING_CONFIG as any).filters;
+      if (filters) {
+        const candles1h = await this.cacheService.getRecentCandles(symbol, '1h', 20);
+        if (candles1h && candles1h.length >= filters.atrPeriod) {
+          const atr = Indicators.calculateAtr(candles1h, filters.atrPeriod);
+          const atrPercent = atr / currentPrice;
+
+          if (atrPercent > filters.maxAtrPercent) {
+            this.logger.debug(
+              `[HourSwing] ${symbol} ❌ ATR too high: ${(atrPercent * 100).toFixed(2)}% > ${(filters.maxAtrPercent * 100).toFixed(2)}%`,
+              'HourSwingSignalService',
+            );
+            return null;
+          }
+
+          if (atrPercent < filters.minAtrPercent) {
+            this.logger.debug(
+              `[HourSwing] ${symbol} ❌ ATR too low: ${(atrPercent * 100).toFixed(2)}% < ${(filters.minAtrPercent * 100).toFixed(2)}%`,
+              'HourSwingSignalService',
+            );
+            return null;
+          }
+
+          this.logger.debug(
+            `[HourSwing] ${symbol} ✅ ATR check passed: ${(atrPercent * 100).toFixed(2)}%`,
+            'HourSwingSignalService',
+          );
+        }
+      }
+
       // Get BTC candles (needed for RS strategy)
       const btcCandles = await this.cacheService.getRecentCandles('BTCUSDT', '1h', 24);
 
@@ -92,6 +126,33 @@ export class HourSwingSignalService {
         const signal = await strategy.detect();
 
         if (signal.detected) {
+          // ========== NEW: Regime Filter ==========
+          const regimeFilter = (HOUR_SWING_CONFIG as any).regimeFilter;
+          if (regimeFilter?.enabled && regimeFilter?.blockCounterTrend) {
+            // Block LONG during STRONG_DOWNTREND
+            if (signal.direction === TradeDirection.LONG && regime === MarketRegime.STRONG_DOWNTREND) {
+              this.logger.warn(
+                `[HourSwing] ${symbol} ❌ REGIME FILTER: LONG blocked during STRONG_DOWNTREND (${signal.subStrategy})`,
+                'HourSwingSignalService',
+              );
+              continue; // Try next sub-strategy
+            }
+
+            // Block SHORT during STRONG_UPTREND
+            if (signal.direction === TradeDirection.SHORT && regime === MarketRegime.STRONG_UPTREND) {
+              this.logger.warn(
+                `[HourSwing] ${symbol} ❌ REGIME FILTER: SHORT blocked during STRONG_UPTREND (${signal.subStrategy})`,
+                'HourSwingSignalService',
+              );
+              continue; // Try next sub-strategy
+            }
+
+            this.logger.debug(
+              `[HourSwing] ${symbol} ✅ Regime filter passed: ${signal.direction} allowed in ${regime}`,
+              'HourSwingSignalService',
+            );
+          }
+
           // Add market regime to signal
           signal.marketRegime = regime;
 

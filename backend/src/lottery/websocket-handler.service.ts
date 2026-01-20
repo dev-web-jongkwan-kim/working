@@ -72,6 +72,11 @@ export class LotteryWebSocketHandler implements OnModuleInit {
         );
       }
 
+      // Handle cancel (manual cancel or expired)
+      if (orderUpdate.orderStatus === 'CANCELED' || orderUpdate.orderStatus === 'EXPIRED') {
+        await this.handleOrderCanceled(lotteryOrder, orderUpdate.orderStatus);
+      }
+
       // Handle stop loss hit
       if (
         orderUpdate.orderStatus === 'FILLED' &&
@@ -80,6 +85,30 @@ export class LotteryWebSocketHandler implements OnModuleInit {
         await this.handleStopLossHit(lotteryOrder);
       }
     }
+  }
+
+  /**
+   * Handle order canceled or expired
+   */
+  private async handleOrderCanceled(order: LotteryOrder, reason: string) {
+    this.logger.warn(`🚫 Order ${reason}: ${order.symbol} (${order.order_id})`);
+
+    order.status = 'CANCELLED';
+    order.closed_at = new Date();
+    order.pnl = 0;
+    order.pnl_pct = 0;
+
+    await this.orderRepo.save(order);
+
+    // Emit WebSocket event
+    this.wsGateway.emitLotteryOrderClosed({
+      orderId: order.order_id,
+      status: 'CANCELLED',
+      pnl: 0,
+      pnlPct: 0,
+    });
+
+    this.logger.log(`[Lottery] ${order.symbol} order ${reason}, will refill on next cycle`);
   }
 
   /**

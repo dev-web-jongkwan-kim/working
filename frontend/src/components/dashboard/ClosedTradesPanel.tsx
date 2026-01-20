@@ -7,7 +7,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { ChevronDown } from 'lucide-react';
 
 export function ClosedTradesPanel({ trades }: { trades: Trade[] }) {
-  const [isOpen, setIsOpen] = useState(false); // Default: collapsed
+  const [isOpen, setIsOpen] = useState(true); // Default: expanded
 
   if (trades.length === 0) {
     return (

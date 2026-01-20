@@ -56,3 +56,16 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# Database files
+*.db
+*.sqlite
+
+# Backup files
+*.bak
+
+# Backend specific md files
+backend/*.md
+backend/CHANGELOG.md
+backend/CODE_REVIEW_DETAILED.md
+backend/ISSUES_FIXED.md

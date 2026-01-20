@@ -9,7 +9,7 @@ export function SystemControl() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [symbolsOpen, setSymbolsOpen] = useState(false);
+  const [symbolsOpen, setSymbolsOpen] = useState(true);
 
   // Market regime descriptions
   const getRegimeDescription = (regime: string | undefined): string => {

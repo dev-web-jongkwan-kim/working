@@ -90,22 +90,20 @@ export class VolumeClimaxDetectorService {
           );
         }
 
-        // Calculate TP/SL based on Fibonacci retracements
+        // Calculate TP/SL based on R:R (Risk:Reward ratio)
         const climaxCandle = candles[climaxIdx];
-        const trendHigh = Math.max(...candles.slice(-this.config.minTrendBars).map((c) => c.high));
-        const trendLow = Math.min(...candles.slice(-this.config.minTrendBars).map((c) => c.low));
-        const trendRange = trendHigh - trendLow;
+        const slDistance = atr * this.config.tpSl.slAtrMultiple;
 
         if (climax.type === 'BUYING') {
           // Buying climax detected -> Go SHORT (fade the climax)
-          const slPrice = currentPrice + atr * this.config.tpSl.slAtrMultiple;
-          const tp1Price = trendHigh - trendRange * 0.382; // 38.2% retracement
-          const tp2Price = trendHigh - trendRange * 0.618; // 61.8% retracement
+          const slPrice = currentPrice + slDistance;
+          const tp1Price = currentPrice - slDistance * this.config.tpSl.tp1RR; // 1.5 R:R
+          const tp2Price = currentPrice - slDistance * this.config.tpSl.tp2RR; // 2.5 R:R
 
           this.logger.log(
             `[VolumeClimax] ${symbol} ✅ BUYING climax -> SHORT signal! ` +
-              `Entry=${currentPrice.toFixed(2)}, SL=${slPrice.toFixed(2)}, ` +
-              `TP1=${tp1Price.toFixed(2)}, TP2=${tp2Price.toFixed(2)}, ` +
+              `Entry=${currentPrice.toFixed(4)}, SL=${slPrice.toFixed(4)}, ` +
+              `TP1=${tp1Price.toFixed(4)} (${this.config.tpSl.tp1RR}R), TP2=${tp2Price.toFixed(4)} (${this.config.tpSl.tp2RR}R), ` +
               `ClimaxVol=${climaxCandle.volume.toFixed(0)}, BarsAgo=${i}`,
             'VolumeClimaxDetector',
           );
@@ -132,14 +130,14 @@ export class VolumeClimaxDetectorService {
           };
         } else {
           // Selling climax detected -> Go LONG (fade the climax)
-          const slPrice = currentPrice - atr * this.config.tpSl.slAtrMultiple;
-          const tp1Price = trendLow + trendRange * 0.382; // 38.2% retracement
-          const tp2Price = trendLow + trendRange * 0.618; // 61.8% retracement
+          const slPrice = currentPrice - slDistance;
+          const tp1Price = currentPrice + slDistance * this.config.tpSl.tp1RR; // 1.5 R:R
+          const tp2Price = currentPrice + slDistance * this.config.tpSl.tp2RR; // 2.5 R:R
 
           this.logger.log(
             `[VolumeClimax] ${symbol} ✅ SELLING climax -> LONG signal! ` +
-              `Entry=${currentPrice.toFixed(2)}, SL=${slPrice.toFixed(2)}, ` +
-              `TP1=${tp1Price.toFixed(2)}, TP2=${tp2Price.toFixed(2)}, ` +
+              `Entry=${currentPrice.toFixed(4)}, SL=${slPrice.toFixed(4)}, ` +
+              `TP1=${tp1Price.toFixed(4)} (${this.config.tpSl.tp1RR}R), TP2=${tp2Price.toFixed(4)} (${this.config.tpSl.tp2RR}R), ` +
               `ClimaxVol=${climaxCandle.volume.toFixed(0)}, BarsAgo=${i}`,
             'VolumeClimaxDetector',
           );

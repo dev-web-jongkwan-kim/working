@@ -245,6 +245,19 @@ export class BinanceService implements OnModuleInit {
   }
 
   /**
+   * Get ALL open orders (all symbols)
+   */
+  async getAllOpenOrders(): Promise<any[]> {
+    try {
+      const orders = await this.client.futuresOpenOrders({});
+      return orders || [];
+    } catch (error) {
+      this.logger.warn(`Failed to get all open orders: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
    * Cancel all open orders for a symbol
    */
   async cancelAllOrders(symbol: string): Promise<void> {

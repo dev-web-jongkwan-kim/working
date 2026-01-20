@@ -64,3 +64,41 @@ export async function getPerformanceSummary() {
   const res = await fetch(`${API_URL}/api/trades/performance`);
   return res.json();
 }
+
+export interface OpenOrder {
+  orderId: number;
+  symbol: string;
+  side: string;
+  type: string;
+  price: number;
+  stopPrice: number;
+  origQty: number;
+  executedQty: number;
+  status: string;
+  timeInForce: string;
+  reduceOnly: boolean;
+  closePosition: boolean;
+  time: number;
+  updateTime: number;
+}
+
+export async function getOpenOrders(): Promise<OpenOrder[]> {
+  const res = await fetch(`${API_URL}/api/trades/orders/open`);
+  return res.json();
+}
+
+export interface DailyStats {
+  date: string;
+  trades: Trade[];
+  totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number;
+  totalPnl: number;
+  totalPnlPercent: number;
+}
+
+export async function getDailyStats(): Promise<DailyStats[]> {
+  const res = await fetch(`${API_URL}/api/trades/stats/daily`);
+  return res.json();
+}

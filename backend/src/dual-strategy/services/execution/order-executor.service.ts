@@ -172,8 +172,28 @@ export class OrderExecutorService {
       // 3. Set margin type to ISOLATED
       await this.setMarginType(request.symbol, 'ISOLATED');
 
-      // 4. Set leverage
-      await this.setLeverage(request.symbol, request.leverage);
+      // 4. Set leverage - CRITICAL: Must succeed before placing order!
+      try {
+        await this.setLeverage(request.symbol, request.leverage);
+      } catch (leverageError) {
+        // CRITICAL: Abort trade if leverage setting fails
+        // This prevents wrong-leverage trades like MERLUSDT incident (expected 20x, got 15x)
+        this.logger.error(
+          `🚨 ABORTING TRADE: Leverage setting failed for ${request.symbol}`,
+          leverageError.stack,
+          'OrderExecutor',
+        );
+
+        await this.signalRepo.update(
+          { signal_id: signalId },
+          {
+            rejected: true,
+            rejection_reason: `Leverage setting failed: ${leverageError.message}`,
+          },
+        );
+
+        return { success: false, error: `Leverage setting failed: ${leverageError.message}` };
+      }
 
       // 5. Execute LIMIT order
       const orderResult = await this.executeBinanceOrder(request);
@@ -261,131 +281,136 @@ export class OrderExecutorService {
           recalculatedPrices.tp2Price,
         );
       } catch (slTpError) {
-        // CRITICAL: SL/TP 주문 실패 - 에러 로그만 남기고 포지션은 OPEN 상태로 유지
-        // 유저 전략: 길게 가져가는 전략이므로 SL/TP 없이도 포지션 유지
+        // CRITICAL: SL/TP 주문 실패 - 즉시 긴급 청산!
+        // SL 없이 포지션 유지는 위험하므로, 즉시 시장가로 청산
         this.logger.error(
-          `WARNING: SL/TP orders failed, but position remains OPEN without protection: ${slTpError.message}`,
+          `CRITICAL: SL/TP orders failed! Initiating emergency close: ${slTpError.message}`,
           slTpError.stack,
           'OrderExecutor',
         );
 
-        // DISABLED: Emergency close removed per user request
-        // Position will remain open without SL/TP protection
-        // Save position to DB normally, just without SL/TP orders placed on exchange
-
-        // Calculate position size
-        const positionSize = actualQuantity;
-        const positionId = `POS_${uuidv4().substring(0, 8)}`;
-
         try {
-          // Save Trade + Position to DB (same as normal flow, but with warning metadata)
-          await this.tradeRepo.manager.transaction(async (manager) => {
-            // Save Trade as OPEN (not CLOSED)
-            await manager.save(Trade, {
-              trade_id: tradeId,
-              signal_id: signalId,
-              strategy_type: request.strategyType,
-              sub_strategy: request.subStrategy,
-              symbol: request.symbol,
-              direction: request.direction as any,
-              entry_price: actualFillPrice,
-              sl_price: recalculatedPrices.slPrice,
-              tp1_price: recalculatedPrices.tp1Price,
-              tp2_price: recalculatedPrices.tp2Price,
-              leverage: request.leverage,
-              margin_usd: request.marginUsd,
-              position_size: positionSize,
-              entry_time: new Date(),
-              status: TradeStatus.OPEN,
-              confidence: request.confidence,
-              market_regime: request.marketRegime,
-              metadata: { ...request.metadata, slTpPlacementFailed: true, slTpError: slTpError.message },
-            });
+          // Emergency close the position
+          await this.emergencyClosePosition(request.symbol, request.direction, actualQuantity);
 
-            // Save Position as ACTIVE (not CLOSED)
-            await manager.save(Position, {
-              position_id: positionId,
-              trade_id: tradeId,
-              strategy_type: request.strategyType,
-              sub_strategy: request.subStrategy,
-              symbol: request.symbol,
-              direction: request.direction as any,
-              entry_price: actualFillPrice,
-              current_price: actualFillPrice,
-              leverage: request.leverage,
-              margin_usd: request.marginUsd,
-              position_size: positionSize,
-              remaining_size: positionSize,
-              sl_price: recalculatedPrices.slPrice,
-              tp1_price: recalculatedPrices.tp1Price,
-              tp2_price: recalculatedPrices.tp2Price,
-              status: PositionStatus.ACTIVE,
-              tp1_filled: false,
-              tp2_filled: false,
-              realized_pnl: 0,
-              unrealized_pnl: 0,
-              unrealized_pnl_percent: 0,
-              entry_time: new Date(),
-              last_update_time: new Date(),
-            });
-
-            // Update signal as executed (not rejected)
-            await manager.update(Signal, { signal_id: signalId }, {
-              executed: true,
-              trade_id: tradeId,
-            });
-          });
-
-          // Log critical warning
-          await this.logger.logStrategy({
-            level: 'warn',
-            strategyType: request.strategyType,
-            subStrategy: request.subStrategy,
-            symbol: request.symbol,
-            eventType: EventType.POSITION_OPENED,
-            message: 'Position opened but SL/TP placement failed - NO PROTECTION',
-            tradeId: tradeId,
-            positionId: positionId,
-            metadata: {
-              error: slTpError.message,
-              entryPrice: actualFillPrice,
-              quantity: actualQuantity,
-              slPrice: recalculatedPrices.slPrice,
-              tp1Price: recalculatedPrices.tp1Price,
-              tp2Price: recalculatedPrices.tp2Price,
-            },
-          });
-
-          // Emit warning to frontend
-          this.wsGateway.emitTradeUpdate({
-            tradeId: tradeId,
-            symbol: request.symbol,
-            status: 'OPEN',
-          });
-
-          // Return success (position is open, just without SL/TP)
-          return {
-            success: true,
-            tradeId,
-          };
-
-        } catch (dbError) {
-          this.logger.error(
-            `CRITICAL: Failed to save position to DB after SL/TP failure: ${dbError.message}`,
-            dbError.stack,
+          this.logger.warn(
+            `🚨 Emergency closed ${request.symbol} due to SL/TP placement failure`,
             'OrderExecutor',
           );
 
-          // Signal as rejected if DB save fails
+          // Save Trade as CLOSED (emergency closed)
+          await this.tradeRepo.save({
+            trade_id: tradeId,
+            signal_id: signalId,
+            strategy_type: request.strategyType,
+            sub_strategy: request.subStrategy,
+            symbol: request.symbol,
+            direction: request.direction as any,
+            entry_price: actualFillPrice,
+            exit_price: actualFillPrice, // ~market close at entry
+            sl_price: recalculatedPrices.slPrice,
+            tp1_price: recalculatedPrices.tp1Price,
+            tp2_price: recalculatedPrices.tp2Price,
+            leverage: request.leverage,
+            margin_usd: request.marginUsd,
+            position_size: actualQuantity,
+            entry_time: new Date(),
+            exit_time: new Date(),
+            status: TradeStatus.CLOSED,
+            close_reason: CloseReason.MANUAL, // Use MANUAL as closest match
+            pnl_usd: 0, // Minimal loss from immediate close
+            pnl_percent: 0,
+            confidence: request.confidence,
+            market_regime: request.marketRegime,
+            metadata: {
+              ...request.metadata,
+              emergencyClosed: true,
+              slTpPlacementFailed: true,
+              slTpError: slTpError.message
+            },
+          });
+
+          // Update signal as rejected (we couldn't maintain position)
           await this.signalRepo.update(
             { signal_id: signalId },
             {
               rejected: true,
-              rejection_reason: `DB save failed after SL/TP failure: ${dbError.message}`,
+              rejection_reason: `SL/TP placement failed - emergency closed: ${slTpError.message}`,
             },
           );
 
-          return { success: false, error: `DB save failed: ${dbError.message}` };
+          // Log the emergency close
+          await this.logger.logStrategy({
+            level: 'error',
+            strategyType: request.strategyType,
+            subStrategy: request.subStrategy,
+            symbol: request.symbol,
+            eventType: EventType.POSITION_CLOSED,
+            message: `EMERGENCY CLOSED: SL/TP placement failed - ${slTpError.message}`,
+            tradeId: tradeId,
+            signalId: signalId,
+            metadata: {
+              reason: 'SL_TP_PLACEMENT_FAILED',
+              slTpError: slTpError.message,
+              entryPrice: actualFillPrice,
+              quantity: actualQuantity,
+            },
+          });
+
+          return {
+            success: false,
+            error: `SL/TP placement failed - emergency closed: ${slTpError.message}`
+          };
+
+        } catch (emergencyCloseError) {
+          // CRITICAL: Emergency close also failed!
+          this.logger.error(
+            `CRITICAL: Emergency close ALSO failed! Manual intervention required: ${emergencyCloseError.message}`,
+            emergencyCloseError.stack,
+            'OrderExecutor',
+          );
+
+          // Save as OPEN with critical warning
+          await this.tradeRepo.save({
+            trade_id: tradeId,
+            signal_id: signalId,
+            strategy_type: request.strategyType,
+            sub_strategy: request.subStrategy,
+            symbol: request.symbol,
+            direction: request.direction as any,
+            entry_price: actualFillPrice,
+            sl_price: recalculatedPrices.slPrice,
+            tp1_price: recalculatedPrices.tp1Price,
+            tp2_price: recalculatedPrices.tp2Price,
+            leverage: request.leverage,
+            margin_usd: request.marginUsd,
+            position_size: actualQuantity,
+            entry_time: new Date(),
+            status: TradeStatus.OPEN,
+            confidence: request.confidence,
+            market_regime: request.marketRegime,
+            metadata: {
+              ...request.metadata,
+              CRITICAL_MANUAL_INTERVENTION_REQUIRED: true,
+              slTpPlacementFailed: true,
+              slTpError: slTpError.message,
+              emergencyCloseFailed: true,
+              emergencyCloseError: emergencyCloseError.message,
+            },
+          });
+
+          await this.signalRepo.update(
+            { signal_id: signalId },
+            {
+              rejected: true,
+              rejection_reason: `CRITICAL: Both SL/TP and emergency close failed!`,
+            },
+          );
+
+          return {
+            success: false,
+            error: `CRITICAL: Emergency close also failed - MANUAL INTERVENTION REQUIRED`
+          };
         }
       }
 
@@ -578,8 +603,9 @@ export class OrderExecutorService {
 
   /**
    * Set leverage for symbol
+   * CRITICAL: Returns true on success, throws error on failure (prevents wrong leverage trades)
    */
-  private async setLeverage(symbol: string, leverage: number): Promise<void> {
+  private async setLeverage(symbol: string, leverage: number): Promise<boolean> {
     try {
       const timestamp = Date.now();
       const params = new URLSearchParams({
@@ -600,12 +626,19 @@ export class OrderExecutorService {
 
       if (!response.ok) {
         const error = await response.json();
-        this.logger.warn(`Failed to set leverage for ${symbol}: ${error.msg}`, 'OrderExecutor');
-      } else {
-        this.logger.log(`Leverage set to ${leverage}x for ${symbol}`, 'OrderExecutor');
+        // CRITICAL: Throw error instead of just warning - prevents wrong leverage trades!
+        throw new Error(`Failed to set leverage for ${symbol}: ${error.msg || error.code}`);
       }
+
+      this.logger.log(`Leverage set to ${leverage}x for ${symbol}`, 'OrderExecutor');
+      return true;
     } catch (error) {
-      this.logger.warn(`Error setting leverage: ${error.message}`, 'OrderExecutor');
+      this.logger.error(
+        `CRITICAL: Leverage setting failed for ${symbol}: ${error.message}`,
+        error.stack,
+        'OrderExecutor'
+      );
+      throw error; // Re-throw to abort the trade
     }
   }
 

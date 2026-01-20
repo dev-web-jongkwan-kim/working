@@ -138,4 +138,55 @@ export class TradesService {
       profitFactor: grossLoss > 0 ? grossProfit / grossLoss : 0,
     };
   }
+
+  /**
+   * Get daily statistics (trades grouped by day)
+   */
+  async getDailyStats(): Promise<{
+    date: string;
+    trades: Trade[];
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    winRate: number;
+    totalPnl: number;
+    totalPnlPercent: number;
+  }[]> {
+    const closedTrades = await this.tradeRepo.find({
+      where: { status: TradeStatus.CLOSED },
+      order: { exit_time: 'DESC' },
+    });
+
+    // Group trades by date
+    const tradesByDate = new Map<string, Trade[]>();
+
+    closedTrades.forEach((trade) => {
+      const dateStr = new Date(trade.exit_time).toISOString().split('T')[0];
+      if (!tradesByDate.has(dateStr)) {
+        tradesByDate.set(dateStr, []);
+      }
+      tradesByDate.get(dateStr)!.push(trade);
+    });
+
+    // Calculate stats for each day
+    const dailyStats = Array.from(tradesByDate.entries()).map(([date, trades]) => {
+      const winningTrades = trades.filter((t) => Number(t.pnl_usd) > 0);
+      const losingTrades = trades.filter((t) => Number(t.pnl_usd) < 0);
+      const totalPnl = trades.reduce((sum, t) => sum + Number(t.pnl_usd), 0);
+      const totalPnlPercent = trades.reduce((sum, t) => sum + Number(t.pnl_percent || 0), 0);
+
+      return {
+        date,
+        trades,
+        totalTrades: trades.length,
+        winningTrades: winningTrades.length,
+        losingTrades: losingTrades.length,
+        winRate: trades.length > 0 ? (winningTrades.length / trades.length) * 100 : 0,
+        totalPnl,
+        totalPnlPercent,
+      };
+    });
+
+    return dailyStats;
+  }
 }

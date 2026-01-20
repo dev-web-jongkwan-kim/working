@@ -29,6 +29,22 @@ export const HOUR_SWING_CONFIG = {
     after60Min: true,
   },
 
+  // Filters (NEW: ATR filter to prevent high-volatility entries)
+  filters: {
+    minAtrPercent: 0.005, // 0.5% minimum
+    maxAtrPercent: 0.035, // 3.5% maximum (같은 기준 Cycle Rider 3%, Box Range 3.5%)
+    atrPeriod: 14,
+  },
+
+  // Regime filter (NEW: prevent counter-trend entries)
+  regimeFilter: {
+    enabled: true,
+    // Block LONG during strong downtrend, SHORT during strong uptrend
+    blockCounterTrend: true,
+    // Only allow trades in these regimes (empty = allow all)
+    allowedRegimes: [], // Will filter STRONG_DOWNTREND/UPTREND in code
+  },
+
   // Sub-strategies
   subStrategies: {
     // 1. MTF Alignment + Pullback
