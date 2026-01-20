@@ -5,19 +5,9 @@ export class Indicators {
    * Calculate ATR (Average True Range)
    */
   static calculateAtr(candles: Candle[], period: number = 14): number {
-    // DEBUG: Log input
-    const symbol = candles[0]?.symbol || 'UNKNOWN';
-    console.log(`[ATR-DEBUG] ${symbol}: Received ${candles.length} candles, period=${period}`);
-
     if (candles.length < period + 1) {
-      console.log(`[ATR-DEBUG] ${symbol}: Insufficient candles (need ${period + 1}, got ${candles.length})`);
       return 0;
     }
-
-    // DEBUG: Check first few candles
-    console.log(`[ATR-DEBUG] ${symbol}: First candle - H=${candles[0]?.high} L=${candles[0]?.low} C=${candles[0]?.close}`);
-    console.log(`[ATR-DEBUG] ${symbol}: Second candle - H=${candles[1]?.high} L=${candles[1]?.low} C=${candles[1]?.close}`);
-    console.log(`[ATR-DEBUG] ${symbol}: Last candle - H=${candles[candles.length-1]?.high} L=${candles[candles.length-1]?.low} C=${candles[candles.length-1]?.close}`);
 
     const trueRanges: number[] = [];
     for (let i = 1; i < candles.length; i++) {
@@ -27,26 +17,16 @@ export class Indicators {
         Math.abs(candles[i].low - candles[i - 1].close),
       );
       trueRanges.push(tr);
-
-      // DEBUG: Log first few TR values
-      if (i <= 3) {
-        console.log(`[ATR-DEBUG] ${symbol}: TR[${i}] = ${tr} (H-L=${candles[i].high - candles[i].low})`);
-      }
     }
-
-    console.log(`[ATR-DEBUG] ${symbol}: Generated ${trueRanges.length} true ranges`);
-    console.log(`[ATR-DEBUG] ${symbol}: First 5 TRs: ${trueRanges.slice(0, 5).join(', ')}`);
 
     // Initial ATR (SMA)
     let atr = trueRanges.slice(0, period).reduce((a, b) => a + b, 0) / period;
-    console.log(`[ATR-DEBUG] ${symbol}: Initial ATR (SMA) = ${atr}`);
 
     // EMA for subsequent values
     for (let i = period; i < trueRanges.length; i++) {
       atr = (atr * (period - 1) + trueRanges[i]) / period;
     }
 
-    console.log(`[ATR-DEBUG] ${symbol}: Final ATR = ${atr}`);
     return atr;
   }
 
