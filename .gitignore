@@ -1,0 +1,58 @@
+# Environment files
+.env
+.env.*
+*.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation (except README)
+LOTTERY_STRATEGY.md
+STRATEGY_PARAMETERS.md
+SYSTEM_FLOW.md
+WORKING.md
+COMMANDS.md
+COMPLETION_SUMMARY.md
+IMPLEMENTATION_STATUS.md
+QUICKSTART.md
+STATUS.md
+STRATEGY_DETAILS.md
+STRATEGY_GUIDE.md
+SYSTEM_DOCUMENTATION.md
+VERIFICATION_REPORT.md
+box_range_implementation_complete.md
+box_range_user_confirmation.md
+s1.md
+strategy_comparison.md
+
+# Backups
+backups/
+
+# Node
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+*.tgz
+*.tar.gz
+
+# Temporary
+tmp/
+temp/
+*.tmp
