@@ -33,6 +33,12 @@ const RISK_CONFIG = {
     enabled: true,
     maxBtcMovePercent: 5,
   },
+  // NEW: 동시 같은 방향 진입 제한 (분당 1개)
+  sameTimeEntry: {
+    enabled: true,
+    maxSameDirectionPerMinute: 1,  // 같은 방향으로 분당 최대 1개
+    windowSeconds: 60,              // 60초 윈도우
+  },
 };
 
 /**
@@ -45,6 +51,7 @@ export class RiskManagerService {
   private readonly REDIS_KEY_CONSECUTIVE_LOSS = 'risk:consecutive_loss_count';
   private readonly REDIS_KEY_LAST_LOSS_TIME = 'risk:last_loss_time';
   private readonly REDIS_KEY_SYMBOL_COOLDOWN = 'risk:symbol_cooldown:'; // + symbol
+  private readonly REDIS_KEY_RECENT_ENTRY = 'risk:recent_entry:'; // + direction (LONG/SHORT)
   private readonly SYMBOL_COOLDOWN_HOURS = 1; // 1 hour cooldown after loss
 
   constructor(
@@ -201,6 +208,24 @@ export class RiskManagerService {
           sameDirection.limitValue,
         );
         return sameDirection;
+      }
+    }
+
+    // 7. NEW: Check same-time same-direction entry (prevent burst entries)
+    if (direction && RISK_CONFIG.sameTimeEntry.enabled) {
+      const sameTimeCheck = await this.checkSameTimeEntry(direction);
+      if (!sameTimeCheck.allowed) {
+        this.logger.warn(
+          `🚫 Same-time entry blocked: ${direction} - ${sameTimeCheck.reason}`,
+          'RiskManager',
+        );
+        await this.recordRiskEvent(
+          RiskEventType.MAX_POSITIONS,
+          RiskSeverity.MEDIUM,
+          sameTimeCheck.reason,
+          symbol,
+        );
+        return sameTimeCheck;
       }
     }
 
@@ -422,6 +447,57 @@ export class RiskManagerService {
     } else {
       // Reset consecutive loss counter on win
       await this.setConsecutiveLossCount(0);
+    }
+  }
+
+  /**
+   * NEW: Check same-time same-direction entry
+   * Prevents multiple entries in the same direction within a short window
+   */
+  private async checkSameTimeEntry(direction: string): Promise<{
+    allowed: boolean;
+    reason?: string;
+  }> {
+    try {
+      const key = this.REDIS_KEY_RECENT_ENTRY + direction;
+      const recentCount = await this.cacheService.client.get(key);
+
+      if (recentCount) {
+        const count = parseInt(recentCount, 10);
+        if (count >= RISK_CONFIG.sameTimeEntry.maxSameDirectionPerMinute) {
+          return {
+            allowed: false,
+            reason: `동시 ${direction} 진입 제한: 최근 ${RISK_CONFIG.sameTimeEntry.windowSeconds}초 내 ${count}개 진입 완료 (최대 ${RISK_CONFIG.sameTimeEntry.maxSameDirectionPerMinute}개)`,
+          };
+        }
+      }
+
+      return { allowed: true };
+    } catch (error) {
+      this.logger.error(`Failed to check same-time entry: ${error.message}`, error.stack, 'RiskManager');
+      return { allowed: true }; // Fail open
+    }
+  }
+
+  /**
+   * NEW: Record recent entry for same-time check
+   * Called after successful order placement
+   */
+  async recordRecentEntry(direction: string): Promise<void> {
+    try {
+      const key = this.REDIS_KEY_RECENT_ENTRY + direction;
+      const current = await this.cacheService.client.get(key);
+      const count = current ? parseInt(current, 10) + 1 : 1;
+
+      await this.cacheService.client.set(key, count.toString());
+      await this.cacheService.client.expire(key, RISK_CONFIG.sameTimeEntry.windowSeconds);
+
+      this.logger.debug(
+        `Recorded ${direction} entry (count: ${count}, window: ${RISK_CONFIG.sameTimeEntry.windowSeconds}s)`,
+        'RiskManager',
+      );
+    } catch (error) {
+      this.logger.error(`Failed to record recent entry: ${error.message}`, error.stack, 'RiskManager');
     }
   }
 

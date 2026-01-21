@@ -41,6 +41,20 @@ export const CYCLE_RIDER_CONFIG = {
     minVolumeRank: 0.3, // Top 70%
   },
 
+  // Regime-based RSI filter (NEW: prevent counter-trend entries without extreme RSI)
+  regimeRsiFilter: {
+    enabled: true,
+    rsiPeriod: 14,
+    // STRONG_DOWNTREND: LONG only when RSI shows extreme oversold
+    strongDowntrendLongMaxRsi: 20,
+    // WEAK_DOWNTREND: LONG requires lower RSI (more caution)
+    weakDowntrendLongMaxRsi: 30,
+    // WEAK_UPTREND: SHORT requires higher RSI (more caution)
+    weakUptrendShortMinRsi: 70,
+    // STRONG_UPTREND: SHORT only when RSI shows extreme overbought
+    strongUptrendShortMinRsi: 80,
+  },
+
   // Sub-strategies
   subStrategies: {
     // 1. Accumulation (Wyckoff)

@@ -246,6 +246,9 @@ export class OrderExecutorService {
           { executed: true },
         );
 
+        // CRITICAL: Record recent entry for same-time entry limit
+        await this.riskManager.recordRecentEntry(request.direction);
+
         return { success: true, tradeId };
       }
 
@@ -524,6 +527,9 @@ export class OrderExecutorService {
         `Order executed successfully: ${request.symbol} ${request.direction} @ ${actualFillPrice}`,
         'OrderExecutor',
       );
+
+      // CRITICAL: Record recent entry for same-time entry limit
+      await this.riskManager.recordRecentEntry(request.direction);
 
       return { success: true, tradeId };
     } catch (error) {
@@ -1581,45 +1587,107 @@ export class OrderExecutorService {
           recalculatedPrices.tp2Price,
         );
       } catch (slTpError) {
-        // CRITICAL: SL/TP 주문 실패 - 에러 로그만 남기고 포지션은 OPEN 상태로 유지
-        // 유저 전략: 길게 가져가는 전략이므로 SL/TP 없이도 포지션 유지
+        // CRITICAL: SL/TP 주문 실패 - 즉시 긴급 청산!
+        // SL 없이 포지션 유지는 위험하므로, 즉시 시장가로 청산
         this.logger.error(
-          `WARNING: SL/TP orders failed for filled entry, but position remains OPEN: ${slTpError.message}`,
+          `CRITICAL: SL/TP orders failed for filled entry! Initiating emergency close: ${slTpError.message}`,
           slTpError.stack,
           'OrderExecutor',
         );
 
-        // DISABLED: Emergency close removed per user request
-        // Position will remain open without SL/TP protection
-        // Continue with normal DB save below (with warning metadata)
+        try {
+          // Emergency close the position
+          await this.emergencyClosePosition(request.symbol, request.direction, filledQty);
 
-        await this.logger.logStrategy({
-          level: 'warn',
-          strategyType: request.strategyType,
-          subStrategy: request.subStrategy,
-          symbol: request.symbol,
-          eventType: EventType.ORDER_FAILED,
-          message: 'SL/TP placement failed for filled entry - position has NO PROTECTION',
-          tradeId: tradeId,
-          metadata: {
-            error: slTpError.message,
-            fillPrice,
-            filledQty,
-            slPrice: recalculatedPrices.slPrice,
-            tp1Price: recalculatedPrices.tp1Price,
-            tp2Price: recalculatedPrices.tp2Price,
-          },
-        });
+          this.logger.warn(
+            `🚨 Emergency closed ${request.symbol} due to SL/TP placement failure`,
+            'OrderExecutor',
+          );
 
-        // Emit warning to frontend
-        this.wsGateway.emitTradeUpdate({
-          tradeId: tradeId,
-          symbol: request.symbol,
-          status: 'OPEN',
-        });
+          // Save Trade as CLOSED (emergency closed)
+          await this.tradeRepo.save({
+            trade_id: tradeId,
+            signal_id: signalId,
+            strategy_type: request.strategyType,
+            sub_strategy: request.subStrategy,
+            symbol: request.symbol,
+            direction: request.direction as any,
+            entry_price: fillPrice,
+            exit_price: fillPrice,
+            sl_price: recalculatedPrices.slPrice,
+            tp1_price: recalculatedPrices.tp1Price,
+            tp2_price: recalculatedPrices.tp2Price,
+            leverage: request.leverage,
+            margin_usd: request.marginUsd,
+            position_size: filledQty,
+            entry_time: new Date(),
+            exit_time: new Date(),
+            status: TradeStatus.CLOSED,
+            close_reason: CloseReason.MANUAL,
+            pnl_usd: 0,
+            pnl_percent: 0,
+            confidence: request.confidence,
+            market_regime: request.marketRegime,
+            metadata: {
+              ...request.metadata,
+              emergencyClosed: true,
+              slTpPlacementFailed: true,
+              slTpError: slTpError.message,
+            },
+          });
 
-        // DO NOT RETURN - continue with DB save below
-        // The position will be saved with slTpPlacementFailed flag in metadata
+          await this.logger.logStrategy({
+            level: 'error',
+            strategyType: request.strategyType,
+            subStrategy: request.subStrategy,
+            symbol: request.symbol,
+            eventType: EventType.POSITION_CLOSED,
+            message: `EMERGENCY CLOSED (pending fill): SL/TP placement failed - ${slTpError.message}`,
+            tradeId: tradeId,
+            signalId: signalId,
+            metadata: {
+              reason: 'SL_TP_PLACEMENT_FAILED',
+              slTpError: slTpError.message,
+              entryPrice: fillPrice,
+              quantity: filledQty,
+            },
+          });
+
+          // Emit to frontend
+          this.wsGateway.emitTradeUpdate({
+            tradeId: tradeId,
+            symbol: request.symbol,
+            status: 'CLOSED',
+          });
+
+          return; // Exit early - position was emergency closed
+
+        } catch (emergencyCloseError) {
+          // CRITICAL: Emergency close also failed!
+          this.logger.error(
+            `CRITICAL: Emergency close ALSO failed! Manual intervention required: ${emergencyCloseError.message}`,
+            emergencyCloseError.stack,
+            'OrderExecutor',
+          );
+
+          // Emit critical warning to frontend
+          this.wsGateway.emitTradeUpdate({
+            tradeId: tradeId,
+            symbol: request.symbol,
+            status: 'OPEN',
+          });
+
+          // Continue with DB save below - position remains OPEN without protection
+          // Add critical warning to metadata
+          request.metadata = {
+            ...request.metadata,
+            CRITICAL_MANUAL_INTERVENTION_REQUIRED: true,
+            slTpPlacementFailed: true,
+            slTpError: slTpError.message,
+            emergencyCloseFailed: true,
+            emergencyCloseError: emergencyCloseError.message,
+          };
+        }
       }
 
       // 3. Save to database (Trade + Position)

@@ -45,6 +45,13 @@ export const HOUR_SWING_CONFIG = {
     allowedRegimes: [], // Will filter STRONG_DOWNTREND/UPTREND in code
   },
 
+  // Concurrent entry limit (NEW: prevent multiple entries at same time)
+  concurrentEntryLimit: {
+    enabled: true,
+    maxEntriesWithinWindow: 2, // 최대 2개까지 동시 진입 허용
+    windowMinutes: 5, // 5분 내 동시 진입 제한
+  },
+
   // Sub-strategies
   subStrategies: {
     // 1. MTF Alignment + Pullback
@@ -54,7 +61,7 @@ export const HOUR_SWING_CONFIG = {
         trendBars: 6,
         minStrength: 0.07, // 최적화: 0.15 → 0.10 → 0.07 (보수적 완화, 99% 차단 해소)
         maxStrength: 0.5, // ★ Not too advanced
-        maxConsecutiveBars: 4, // ★ CRITICAL filter
+        maxConsecutiveBars: 3, // ★ CRITICAL filter (최적화: 4 → 3, win rate 67%)
         emaPeriod: 20,
       },
       m15: {
@@ -78,6 +85,15 @@ export const HOUR_SWING_CONFIG = {
       fundingFilter: {
         longMax: 0.0003, // <0.03% for long
         shortMin: -0.0003, // >-0.03% for short
+      },
+      // NEW: RSI 모멘텀 반전 필터 (과매수/과매도 진입 방지)
+      rsiFilter: {
+        enabled: true,
+        period: 14,
+        // SHORT 진입 시: RSI가 이미 과매도면 반전 가능성 → 차단
+        shortOversoldThreshold: 35,  // RSI < 35면 SHORT 금지
+        // LONG 진입 시: RSI가 이미 과매수면 반전 가능성 → 차단
+        longOverboughtThreshold: 65, // RSI > 65면 LONG 금지
       },
       tpSl: {
         slAtrMultiple: 1.0,

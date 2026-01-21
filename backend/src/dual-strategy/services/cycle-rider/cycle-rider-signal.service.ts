@@ -81,6 +81,16 @@ export class CycleRiderSignalService {
             continue;
           }
 
+          // Apply regime-based RSI filter (NEW!)
+          const regimeRsiCheck = this.checkRegimeRsiFilter(candles, signal.direction, regime);
+          if (!regimeRsiCheck.passed) {
+            this.logger.log(
+              `[CycleRider] ${symbol} ❌ REGIME RSI FILTER: ${regimeRsiCheck.reason}`,
+              'CycleRiderSignalService',
+            );
+            continue;
+          }
+
           // Add market regime to signal
           signal.marketRegime = regime;
 
@@ -174,5 +184,70 @@ export class CycleRiderSignalService {
     }
 
     return { passed: true };
+  }
+
+  /**
+   * Check regime-based RSI filter (NEW!)
+   * Requires extreme RSI for counter-trend entries
+   * - STRONG_DOWNTREND: LONG only when RSI < 20
+   * - WEAK_DOWNTREND: LONG only when RSI < 30
+   * - WEAK_UPTREND: SHORT only when RSI > 70
+   * - STRONG_UPTREND: SHORT only when RSI > 80
+   */
+  private checkRegimeRsiFilter(
+    candles: any[],
+    direction: string,
+    regime: MarketRegime,
+  ): { passed: boolean; reason?: string; rsi?: number } {
+    const regimeFilter = this.config.regimeRsiFilter;
+    if (!regimeFilter?.enabled) {
+      return { passed: true };
+    }
+
+    const rsi = Indicators.calculateRsi(candles, regimeFilter.rsiPeriod);
+
+    // LONG entries in downtrend regimes require low RSI
+    if (direction === 'LONG') {
+      if (regime === MarketRegime.STRONG_DOWNTREND) {
+        if (rsi > regimeFilter.strongDowntrendLongMaxRsi) {
+          return {
+            passed: false,
+            reason: `STRONG_DOWNTREND + LONG: RSI=${rsi.toFixed(1)} > ${regimeFilter.strongDowntrendLongMaxRsi} (need extreme oversold)`,
+            rsi,
+          };
+        }
+      } else if (regime === MarketRegime.WEAK_DOWNTREND) {
+        if (rsi > regimeFilter.weakDowntrendLongMaxRsi) {
+          return {
+            passed: false,
+            reason: `WEAK_DOWNTREND + LONG: RSI=${rsi.toFixed(1)} > ${regimeFilter.weakDowntrendLongMaxRsi} (need oversold)`,
+            rsi,
+          };
+        }
+      }
+    }
+
+    // SHORT entries in uptrend regimes require high RSI
+    if (direction === 'SHORT') {
+      if (regime === MarketRegime.STRONG_UPTREND) {
+        if (rsi < regimeFilter.strongUptrendShortMinRsi) {
+          return {
+            passed: false,
+            reason: `STRONG_UPTREND + SHORT: RSI=${rsi.toFixed(1)} < ${regimeFilter.strongUptrendShortMinRsi} (need extreme overbought)`,
+            rsi,
+          };
+        }
+      } else if (regime === MarketRegime.WEAK_UPTREND) {
+        if (rsi < regimeFilter.weakUptrendShortMinRsi) {
+          return {
+            passed: false,
+            reason: `WEAK_UPTREND + SHORT: RSI=${rsi.toFixed(1)} < ${regimeFilter.weakUptrendShortMinRsi} (need overbought)`,
+            rsi,
+          };
+        }
+      }
+    }
+
+    return { passed: true, rsi };
   }
 }

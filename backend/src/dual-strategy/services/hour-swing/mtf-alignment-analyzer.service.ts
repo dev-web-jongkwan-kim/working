@@ -129,7 +129,27 @@ export class MtfAlignmentAnalyzerService {
       return { detected: false } as any;
     }
 
-    // 6. Calculate TP/SL (Fixed R/R 1:1.8)
+    // 6. NEW: RSI 모멘텀 반전 필터 (과매수/과매도 진입 방지)
+    if (this.config.rsiFilter?.enabled) {
+      const rsi = Indicators.calculateRsi(m15Candles, this.config.rsiFilter.period);
+      const rsiCheck = this.checkRsiFilter(rsi, h1Analysis.direction);
+
+      this.logger.debug(
+        `[MTF Alignment] ${symbol} RSI filter: ok=${rsiCheck.ok}, RSI=${rsi.toFixed(1)} ` +
+          `(direction: ${h1Analysis.direction}, threshold: ${rsiCheck.threshold})`,
+        'MtfAlignmentAnalyzer',
+      );
+
+      if (!rsiCheck.ok) {
+        this.logger.log(
+          `[MTF Alignment] ${symbol} ❌ RSI filter blocked: RSI=${rsi.toFixed(1)} ${rsiCheck.reason}`,
+          'MtfAlignmentAnalyzer',
+        );
+        return { detected: false } as any;
+      }
+    }
+
+    // 7. Calculate TP/SL (Fixed R/R 1:1.8)
     const direction = h1Analysis.direction === 'UP' ? TradeDirection.LONG : TradeDirection.SHORT;
     const m5Atr = Indicators.calculateAtr(m5Candles, 14);
 
@@ -304,5 +324,37 @@ export class MtfAlignmentAnalyzerService {
     }
 
     return true;
+  }
+
+  /**
+   * Check RSI filter to prevent entries when momentum is exhausted
+   * - SHORT entry: Block if RSI < oversold threshold (potential reversal up)
+   * - LONG entry: Block if RSI > overbought threshold (potential reversal down)
+   */
+  private checkRsiFilter(
+    rsi: number,
+    direction: 'UP' | 'DOWN' | 'NEUTRAL',
+  ): { ok: boolean; threshold: number; reason?: string } {
+    if (direction === 'DOWN') {
+      // SHORT entry - block if already oversold (potential bounce)
+      if (rsi < this.config.rsiFilter.shortOversoldThreshold) {
+        return {
+          ok: false,
+          threshold: this.config.rsiFilter.shortOversoldThreshold,
+          reason: `과매도 구간 (RSI < ${this.config.rsiFilter.shortOversoldThreshold}) - SHORT 금지`,
+        };
+      }
+    } else if (direction === 'UP') {
+      // LONG entry - block if already overbought (potential drop)
+      if (rsi > this.config.rsiFilter.longOverboughtThreshold) {
+        return {
+          ok: false,
+          threshold: this.config.rsiFilter.longOverboughtThreshold,
+          reason: `과매수 구간 (RSI > ${this.config.rsiFilter.longOverboughtThreshold}) - LONG 금지`,
+        };
+      }
+    }
+
+    return { ok: true, threshold: 0 };
   }
 }

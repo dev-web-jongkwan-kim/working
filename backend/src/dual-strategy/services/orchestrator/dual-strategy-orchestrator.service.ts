@@ -8,6 +8,7 @@ import { BoxRangeSignalService } from '../box-range/box-range-signal.service';
 import { OrderExecutorService } from '../execution/order-executor.service';
 import { PositionManagerService } from '../execution/position-manager.service';
 import { RiskManagerService } from '../execution/risk-manager.service';
+import { SignalQueueService } from '../execution/signal-queue.service';
 import { DataCollectorService } from '../data/data-collector.service';
 import { DataCacheService } from '../data/data-cache.service';
 import { SymbolFetcherService } from '../data/symbol-fetcher.service';
@@ -28,6 +29,9 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
   private symbols: string[] = [];
   private processingSymbols: Set<string> = new Set(); // Prevent duplicate signals
 
+  // Hour Swing concurrent entry tracking (5분 내 동시 진입 제한)
+  private hourSwingEntryTimestamps: number[] = [];
+
   // 1m Entry Performance Tracking
   private oneMinuteStats = {
     boxRangeChecks: 0,
@@ -46,6 +50,7 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
     private readonly orderExecutor: OrderExecutorService,
     private readonly positionManager: PositionManagerService,
     private readonly riskManager: RiskManagerService,
+    private readonly signalQueue: SignalQueueService,
     private readonly dataCollector: DataCollectorService,
     private readonly cacheService: DataCacheService,
     private readonly symbolFetcher: SymbolFetcherService,
@@ -83,6 +88,10 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         strategies: ['CYCLE_RIDER', 'HOUR_SWING', 'BOX_RANGE'],
       },
     });
+
+    // Clear signal queue on startup (prevent stale signals from previous run)
+    await this.signalQueue.clearQueue();
+    this.logger.log('🧹 Signal queue cleared on startup', 'DualStrategyOrchestrator');
 
     // Start data collection
     await this.dataCollector.startCollection(this.symbols);
@@ -532,7 +541,7 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
 
   /**
    * Process Cycle Rider for a single symbol (event-driven)
-   * Returns true if signal was detected and processed
+   * Returns true if signal was detected and queued/processed
    */
   private async runCycleRiderForSymbol(
     symbol: string,
@@ -574,30 +583,40 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         return false; // Validation failed
       }
 
-      this.logger.log(
-        `⚡📊 [EVENT-DRIVEN Cycle Rider] ${symbol} ${signal.direction} - ${signal.subStrategy}`,
-        'DualStrategyOrchestrator',
-      );
+      // NEW: Short-term momentum check before entry
+      const momentumCheck = await this.checkShortTermMomentum(signal.direction);
+      if (!momentumCheck.allowed) {
+        this.logger.warn(
+          `[Cycle Rider] ${symbol} ❌ MOMENTUM FILTER: ${momentumCheck.reason}`,
+          'DualStrategyOrchestrator',
+        );
+        return false;
+      }
 
-      await this.orderExecutor.executeOrder({
-        symbol,
-        direction: signal.direction,
-        strategyType: 'CYCLE_RIDER' as any,
-        subStrategy: signal.subStrategy,
-        entryPrice: signal.entryPrice,
-        slPrice: signal.slPrice,
-        tp1Price: signal.tp1Price,
-        tp2Price: signal.tp2Price,
+      // Add leverage and margin to metadata for queue processing
+      signal.metadata = {
+        ...signal.metadata,
         leverage: CYCLE_RIDER_CONFIG.position.leverage,
         marginUsd: CYCLE_RIDER_CONFIG.position.marginUsd,
-        useTrailing: false,
-        confidence: signal.confidence,
-        marketRegime: regime,
-        metadata: signal.metadata,
-      });
+      };
 
-      this.positionManager.setCooldown(symbol, 'CYCLE_RIDER');
-      return true; // Signal detected and processed
+      // Add to signal queue for staggered processing
+      const added = await this.signalQueue.addToQueue(signal, symbol, regime);
+
+      if (added) {
+        this.logger.log(
+          `⚡📊 [Cycle Rider] ${symbol} ${signal.direction} queued - ${signal.subStrategy}`,
+          'DualStrategyOrchestrator',
+        );
+        this.positionManager.setCooldown(symbol, 'CYCLE_RIDER');
+        return true;
+      } else {
+        this.logger.debug(
+          `[Cycle Rider] ${symbol} already in queue, skipping duplicate`,
+          'DualStrategyOrchestrator',
+        );
+        return false;
+      }
     } finally {
       // CRITICAL: Always remove from processing set
       this.processingSymbols.delete(symbol);
@@ -647,29 +666,38 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         return; // Validation failed
       }
 
-      this.logger.log(
-        `⚡📊 [EVENT-DRIVEN Hour Swing] ${symbol} ${signal.direction} - ${signal.subStrategy}`,
-        'DualStrategyOrchestrator',
-      );
+      // NEW: Short-term momentum check before entry
+      const momentumCheck = await this.checkShortTermMomentum(signal.direction);
+      if (!momentumCheck.allowed) {
+        this.logger.warn(
+          `[Hour Swing] ${symbol} ❌ MOMENTUM FILTER: ${momentumCheck.reason}`,
+          'DualStrategyOrchestrator',
+        );
+        return;
+      }
 
-      await this.orderExecutor.executeOrder({
-        symbol,
-        direction: signal.direction,
-        strategyType: 'HOUR_SWING' as any,
-        subStrategy: signal.subStrategy,
-        entryPrice: signal.entryPrice,
-        slPrice: signal.slPrice,
-        tp1Price: signal.tp1Price,
-        tp2Price: signal.tp2Price,
+      // Add leverage and margin to metadata for queue processing
+      signal.metadata = {
+        ...signal.metadata,
         leverage: HOUR_SWING_CONFIG.position.leverage,
         marginUsd: HOUR_SWING_CONFIG.position.marginUsd,
-        useTrailing: false,
-        confidence: signal.confidence,
-        marketRegime: regime,
-        metadata: signal.metadata,
-      });
+      };
 
-      this.positionManager.setCooldown(symbol, 'HOUR_SWING');
+      // Add to signal queue for staggered processing
+      const added = await this.signalQueue.addToQueue(signal, symbol, regime);
+
+      if (added) {
+        this.logger.log(
+          `⚡📊 [Hour Swing] ${symbol} ${signal.direction} queued - ${signal.subStrategy}`,
+          'DualStrategyOrchestrator',
+        );
+        this.positionManager.setCooldown(symbol, 'HOUR_SWING');
+      } else {
+        this.logger.debug(
+          `[Hour Swing] ${symbol} already in queue, skipping duplicate`,
+          'DualStrategyOrchestrator',
+        );
+      }
     } finally {
       // CRITICAL: Always remove from processing set
       this.processingSymbols.delete(symbol);
@@ -909,6 +937,270 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         error.stack,
         'DualStrategyOrchestrator',
       );
+    }
+  }
+
+  /**
+   * Hourly Regime Update - 매 시간 정각에 레짐 재분류
+   */
+  @Cron('0 * * * *') // 매 시간 정각
+  async updateRegimeHourly(): Promise<void> {
+    if (!this.isRunning) return;
+
+    this.logger.log(
+      '🔄 [Regime Update] Hourly regime classification running...',
+      'DualStrategyOrchestrator',
+    );
+
+    try {
+      const previousRegime = this.regimeClassifier.getCurrentRegime();
+      const newRegime = await this.regimeClassifier.classifyRegime();
+
+      if (previousRegime !== newRegime) {
+        this.logger.log(
+          `🔄 [Regime Update] Regime changed: ${previousRegime} → ${newRegime}`,
+          'DualStrategyOrchestrator',
+        );
+      } else {
+        this.logger.debug(
+          `[Regime Update] Regime unchanged: ${newRegime}`,
+          'DualStrategyOrchestrator',
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `[Regime Update] Failed: ${error.message}`,
+        error.stack,
+        'DualStrategyOrchestrator',
+      );
+    }
+  }
+
+  /**
+   * Process Signal Queue - 2분마다 대기 중인 신호 처리
+   * Staggered entry system to prevent concurrent entries
+   */
+  @Cron('*/2 * * * *') // Every 2 minutes
+  async processSignalQueue(): Promise<void> {
+    if (!this.isRunning) return;
+
+    // Check if enough time has passed since last processing
+    if (!this.signalQueue.canProcessNext()) {
+      return;
+    }
+
+    // Get queue size
+    const queueSize = await this.signalQueue.getQueueSize();
+    if (queueSize === 0) {
+      return;
+    }
+
+    this.logger.log(
+      `[SignalQueue] 🔄 Processing queue (${queueSize} signals pending)`,
+      'DualStrategyOrchestrator',
+    );
+
+    // Acquire processing lock
+    if (!this.signalQueue.markProcessingStarted()) {
+      this.logger.debug(
+        '[SignalQueue] Already processing, skipping',
+        'DualStrategyOrchestrator',
+      );
+      return;
+    }
+
+    try {
+      // Get next signal from queue (highest priority first)
+      const queuedSignal = await this.signalQueue.getNextSignal();
+      if (!queuedSignal) {
+        this.logger.debug(
+          '[SignalQueue] No signal available after dequeue',
+          'DualStrategyOrchestrator',
+        );
+        return;
+      }
+
+      const { signal, symbol, direction, regime } = queuedSignal;
+
+      // Re-validate signal before entry
+      const currentPrice = await this.cacheService.getCurrentPrice(symbol);
+      if (!currentPrice) {
+        this.logger.warn(
+          `[SignalQueue] ${symbol} No current price, skipping`,
+          'DualStrategyOrchestrator',
+        );
+        return;
+      }
+
+      const currentRegime = this.regimeClassifier.getCurrentRegime();
+      const validation = await this.signalQueue.validateSignalForEntry(
+        queuedSignal,
+        currentPrice,
+        currentRegime,
+      );
+
+      if (!validation.valid) {
+        this.logger.log(
+          `[SignalQueue] ${symbol} ❌ Re-validation failed: ${validation.reason}`,
+          'DualStrategyOrchestrator',
+        );
+        return;
+      }
+
+      // Check regime-based concurrent entry limit
+      const positions = await this.positionManager.getActivePositions();
+      const sameDirectionCount = positions.filter(
+        (p) => p.direction === direction,
+      ).length;
+      const maxConcurrent = this.signalQueue.getMaxConcurrentEntries(
+        direction,
+        currentRegime,
+      );
+
+      if (sameDirectionCount >= maxConcurrent) {
+        this.logger.log(
+          `[SignalQueue] ${symbol} ❌ Max concurrent ${direction} reached (${sameDirectionCount}/${maxConcurrent}) for regime ${currentRegime}`,
+          'DualStrategyOrchestrator',
+        );
+        return;
+      }
+
+      // Check if symbol already has position
+      if (positions.some((p) => p.symbol === symbol)) {
+        this.logger.log(
+          `[SignalQueue] ${symbol} ❌ Already has active position`,
+          'DualStrategyOrchestrator',
+        );
+        return;
+      }
+
+      // Recalculate entry price based on current price
+      const priceDiff = (currentPrice - signal.entryPrice) / signal.entryPrice;
+      const adjustedSlPrice = signal.slPrice * (1 + priceDiff);
+      const adjustedTp1Price = signal.tp1Price * (1 + priceDiff);
+      const adjustedTp2Price = signal.tp2Price * (1 + priceDiff);
+
+      this.logger.log(
+        `[SignalQueue] ${symbol} ✅ Executing queued ${direction} signal @ ${currentPrice.toFixed(4)}`,
+        'DualStrategyOrchestrator',
+      );
+
+      // Execute the order
+      await this.orderExecutor.executeOrder({
+        symbol,
+        direction: signal.direction,
+        strategyType: signal.strategyType,
+        subStrategy: signal.subStrategy,
+        entryPrice: currentPrice,
+        slPrice: adjustedSlPrice,
+        tp1Price: adjustedTp1Price,
+        tp2Price: adjustedTp2Price,
+        leverage: signal.metadata?.leverage || 15,
+        marginUsd: signal.metadata?.marginUsd || 50,
+        useTrailing: signal.useTrailing,
+        confidence: signal.confidence,
+        marketRegime: currentRegime,
+        metadata: {
+          ...signal.metadata,
+          queuedAt: queuedSignal.createdAt,
+          queueWaitMs: Date.now() - queuedSignal.createdAt,
+          originalEntryPrice: signal.entryPrice,
+        },
+      });
+
+      this.logger.log(
+        `[SignalQueue] ${symbol} ⚡ Queued signal executed successfully`,
+        'DualStrategyOrchestrator',
+      );
+    } catch (error) {
+      this.logger.error(
+        `[SignalQueue] Error processing queue: ${error.message}`,
+        error.stack,
+        'DualStrategyOrchestrator',
+      );
+    } finally {
+      this.signalQueue.markProcessingCompleted();
+    }
+  }
+
+  /**
+   * Check Hour Swing concurrent entry limit
+   * Prevents multiple entries within time window
+   */
+  private checkHourSwingConcurrentLimit(): { allowed: boolean; reason?: string } {
+    if (!HOUR_SWING_CONFIG.concurrentEntryLimit?.enabled) {
+      return { allowed: true };
+    }
+
+    const windowMs = HOUR_SWING_CONFIG.concurrentEntryLimit.windowMinutes * 60 * 1000;
+    const maxEntries = HOUR_SWING_CONFIG.concurrentEntryLimit.maxEntriesWithinWindow;
+    const now = Date.now();
+
+    // Remove old timestamps outside the window
+    this.hourSwingEntryTimestamps = this.hourSwingEntryTimestamps.filter(
+      (ts) => now - ts < windowMs,
+    );
+
+    // Check if we've reached the limit
+    if (this.hourSwingEntryTimestamps.length >= maxEntries) {
+      const oldestEntry = Math.min(...this.hourSwingEntryTimestamps);
+      const waitMinutes = Math.ceil((oldestEntry + windowMs - now) / 60000);
+      return {
+        allowed: false,
+        reason: `${this.hourSwingEntryTimestamps.length} entries in last ${HOUR_SWING_CONFIG.concurrentEntryLimit.windowMinutes}min (max: ${maxEntries}), wait ~${waitMinutes}min`,
+      };
+    }
+
+    return { allowed: true };
+  }
+
+  /**
+   * Check short-term momentum before entry
+   * Returns true if momentum aligns with trade direction
+   */
+  async checkShortTermMomentum(direction: 'LONG' | 'SHORT'): Promise<{
+    allowed: boolean;
+    reason?: string;
+    btcChange?: number;
+  }> {
+    try {
+      // Get BTC last 4 hours of 1H candles
+      const btcCandles = await this.cacheService.getRecentCandles('BTCUSDT', '1h', 4);
+
+      if (!btcCandles || btcCandles.length < 4) {
+        return { allowed: true }; // Not enough data, allow
+      }
+
+      // Calculate 4-hour price change
+      const startPrice = btcCandles[0].open;
+      const endPrice = btcCandles[btcCandles.length - 1].close;
+      const btcChange = ((endPrice - startPrice) / startPrice) * 100;
+
+      // Check if momentum aligns with direction
+      if (direction === 'LONG' && btcChange < -1.0) {
+        return {
+          allowed: false,
+          reason: `BTC 4H momentum negative (${btcChange.toFixed(2)}%), blocking LONG`,
+          btcChange,
+        };
+      }
+
+      if (direction === 'SHORT' && btcChange > 1.0) {
+        return {
+          allowed: false,
+          reason: `BTC 4H momentum positive (+${btcChange.toFixed(2)}%), blocking SHORT`,
+          btcChange,
+        };
+      }
+
+      return { allowed: true, btcChange };
+    } catch (error) {
+      this.logger.error(
+        `[Momentum Check] Error: ${error.message}`,
+        error.stack,
+        'DualStrategyOrchestrator',
+      );
+      return { allowed: true }; // On error, allow
     }
   }
 

@@ -1,13 +1,32 @@
 'use client';
 
-import { useState } from 'react';
-import { Trade } from '@/lib/api/trades';
+import { useState, useEffect } from 'react';
+import { Trade, getClosedTrades } from '@/lib/api/trades';
 import { formatDistanceToNow } from 'date-fns';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { ChevronDown } from 'lucide-react';
 
-export function ClosedTradesPanel({ trades }: { trades: Trade[] }) {
+export function ClosedTradesPanel({ trades: initialTrades }: { trades?: Trade[] }) {
+  const [trades, setTrades] = useState<Trade[]>(initialTrades || []);
   const [isOpen, setIsOpen] = useState(true); // Default: expanded
+  const [loading, setLoading] = useState(!initialTrades || initialTrades.length === 0);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const data = await getClosedTrades(20);
+        setTrades(data);
+      } catch (error) {
+        console.error('Failed to fetch closed trades:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+    const interval = setInterval(fetchData, 15000); // Refresh every 15 seconds
+    return () => clearInterval(interval);
+  }, []);
 
   if (trades.length === 0) {
     return (

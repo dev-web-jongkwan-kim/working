@@ -44,6 +44,7 @@ import { OrderExecutorService } from './services/execution/order-executor.servic
 import { PositionManagerService } from './services/execution/position-manager.service';
 import { RiskManagerService } from './services/execution/risk-manager.service';
 import { PositionReconcilerService } from './services/execution/position-reconciler.service';
+import { SignalQueueService } from './services/execution/signal-queue.service';
 
 // Orchestrator
 import { DualStrategyOrchestratorService } from './services/orchestrator/dual-strategy-orchestrator.service';
@@ -108,6 +109,7 @@ import { LotteryModule } from '../lottery/lottery.module';
     PositionManagerService,
     RiskManagerService,
     PositionReconcilerService,
+    SignalQueueService,
 
     // Orchestrator
     DualStrategyOrchestratorService,

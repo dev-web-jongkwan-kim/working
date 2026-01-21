@@ -126,7 +126,20 @@ export class PositionManagerService {
   }
 
   /**
-   * Check exit conditions (SL, TP, trailing, time-based)
+   * Check exit conditions (trailing stop only)
+   *
+   * CRITICAL FIX: SL/TP checks REMOVED to prevent race conditions
+   *
+   * Bug was: PositionManager checked price vs SL/TP levels every 10 seconds.
+   * When price touched SL/TP, PositionManager would:
+   *   1. Cancel all Binance orders (including the real SL/TP orders!)
+   *   2. Mark position as CLOSED in DB
+   *   3. BUT NOT actually close the position on Binance!
+   * Result: Position left open on Binance without any SL protection.
+   *
+   * Solution: Let Binance SL/TP orders execute naturally.
+   * UserDataStream handles the actual fills and updates DB accordingly.
+   * PositionManager only handles: trailing stops, P&L monitoring, time-based exits.
    */
   private async checkExitConditions(
     position: Position,
@@ -136,44 +149,44 @@ export class PositionManagerService {
   ): Promise<void> {
     const isLong = position.direction === 'LONG';
 
-    // 1. Check Stop Loss
-    if (
-      (isLong && currentPrice <= position.sl_price) ||
-      (!isLong && currentPrice >= position.sl_price)
-    ) {
-      await this.closePosition(position, currentPrice, CloseReason.SL_HIT, pnl);
-      return;
-    }
+    // SL/TP checks REMOVED - handled by Binance orders + UserDataStream
+    // DO NOT check SL/TP here - it causes race conditions that cancel orders
+    // while leaving positions open on Binance without protection!
 
-    // 2. Check TP1
-    if (
-      !position.tp1_filled &&
-      position.tp1_price &&
-      ((isLong && currentPrice >= position.tp1_price) ||
-        (!isLong && currentPrice <= position.tp1_price))
-    ) {
-      await this.closePartialPosition(position, currentPrice, 'TP1', 50);
-      return;
-    }
-
-    // 3. Check TP2
-    if (
-      position.tp1_filled &&
-      !position.tp2_filled &&
-      position.tp2_price &&
-      ((isLong && currentPrice >= position.tp2_price) ||
-        (!isLong && currentPrice <= position.tp2_price))
-    ) {
-      await this.closePartialPosition(position, currentPrice, 'TP2', 50);
-      return;
-    }
-
-    // 4. Check trailing stop
+    // Only check trailing stop (which is managed separately from SL/TP orders)
     if (position.trailing_enabled && position.trailing_stop_price) {
       if (
         (isLong && currentPrice <= position.trailing_stop_price) ||
         (!isLong && currentPrice >= position.trailing_stop_price)
       ) {
+        // CRITICAL: Actually close position on Binance before canceling orders
+        this.logger.log(
+          `🎯 Trailing stop hit for ${position.symbol}: Price ${currentPrice} vs Trailing ${position.trailing_stop_price}`,
+          'PositionManager',
+        );
+
+        try {
+          // First, close the actual position on Binance
+          const side = isLong ? 'SELL' : 'BUY';
+          await this.binanceService.futuresOrder({
+            symbol: position.symbol,
+            side,
+            type: 'MARKET',
+            quantity: position.remaining_size.toString(),
+          });
+          this.logger.log(
+            `✅ Trailing stop executed: ${position.symbol} ${side} MARKET @ ${currentPrice}`,
+            'PositionManager',
+          );
+        } catch (error) {
+          this.logger.error(
+            `❌ Failed to execute trailing stop for ${position.symbol}: ${error.message}`,
+            error.stack,
+            'PositionManager',
+          );
+          return; // Don't mark as closed if we couldn't close on Binance
+        }
+
         await this.closePosition(position, currentPrice, CloseReason.TRAILING_STOP, pnl);
         return;
       }
@@ -182,9 +195,7 @@ export class PositionManagerService {
       await this.updateTrailingStop(position, currentPrice);
     }
 
-    // 5. DISABLED: Time-based exits removed per user request
-    // User strategy: Hold positions long-term, only close via TP/SL
-    // await this.checkTimeBasedExits(position, currentPrice, pnl);
+    // Time-based exits disabled per user request
   }
 
   /**
