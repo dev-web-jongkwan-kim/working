@@ -188,6 +188,77 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
   }
 
   /**
+   * Manual scan trigger - runs all strategies for all symbols immediately
+   * Useful when system was down and missed scheduled scans
+   */
+  async runManualScan(): Promise<{
+    scannedSymbols: number;
+    queueSize: number;
+    errors: string[];
+  }> {
+    if (!this.isRunning) {
+      throw new Error('System is not running. Start the system first.');
+    }
+
+    this.logger.log('🔄 [Manual Scan] Starting manual scan for all symbols...', 'DualStrategyOrchestrator');
+
+    const results = {
+      scannedSymbols: 0,
+      queueSize: 0,
+      errors: [] as string[],
+    };
+
+    const regime = this.regimeClassifier.getCurrentRegime();
+    const weights = this.regimeClassifier.getStrategyWeights();
+    const positions = await this.positionManager.getActivePositions();
+
+    // Scan each symbol
+    for (const symbol of this.symbols) {
+      if (this.processingSymbols.has(symbol)) {
+        continue;
+      }
+
+      try {
+        results.scannedSymbols++;
+
+        // Run Cycle Rider
+        const cycleRiderCount = positions.filter((p) => p.strategy_type === 'CYCLE_RIDER').length;
+        if (cycleRiderCount < CYCLE_RIDER_CONFIG.position.maxPositions) {
+          await this.runCycleRiderForSymbol(symbol, regime, positions, weights.cycleRider);
+          // Note: Cycle Rider processes directly, doesn't return signal
+        }
+
+        // Run Box Range
+        const boxRangeCount = positions.filter((p) => p.strategy_type === 'BOX_RANGE').length;
+        if (boxRangeCount < BOX_RANGE_CONFIG.position.maxPositions) {
+          await this.runBoxRangeForSymbol(symbol, regime, positions);
+          // Note: Box Range doesn't return signal directly, it stores boxes for 1m entry
+        }
+
+        // Run Hour Swing
+        const hourSwingCount = positions.filter((p) => p.strategy_type === 'HOUR_SWING').length;
+        if (hourSwingCount < HOUR_SWING_CONFIG.position.maxPositions) {
+          await this.runHourSwingForSymbol(symbol, regime, positions, weights.hourSwing);
+          // Note: Hour Swing adds to queue, doesn't return signal directly
+        }
+      } catch (error) {
+        results.errors.push(`${symbol}: ${error.message}`);
+      }
+    }
+
+    // Get final queue size
+    results.queueSize = await this.signalQueue.getQueueSize();
+
+    this.logger.log(
+      `✅ [Manual Scan] Completed: ${results.scannedSymbols} symbols scanned, ` +
+        `${results.queueSize} signals in queue, ${results.errors.length} errors`,
+      'DualStrategyOrchestrator',
+    );
+
+    return results;
+  }
+
+  /**
    * Check if a symbol has recent trading activity
    * Returns true if symbol has non-zero volume in last 45 minutes
    */

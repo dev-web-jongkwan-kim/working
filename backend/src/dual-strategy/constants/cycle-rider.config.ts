@@ -6,14 +6,14 @@
 export const CYCLE_RIDER_CONFIG = {
   // Position management
   position: {
-    leverage: 15,
+    leverage: 10, // 최적화: 15 → 10 (추세 전략은 되돌림 견딜 여유 필요)
     marginUsd: 50,
     maxPositions: 5, // 최적화: 3 → 5 (강세장 기회비용 감소)
     maxSameDirection: 3, // maxPositions 증가에 따라 조정
     minHoldMinutes: 30,
     maxHoldMinutes: 240, // 4 hours
     tp1ClosePercent: 25, // 최적화: 50 → 25 (추세 몸통 수익 보존 비중 확대)
-    cooldownMinutes: 15,
+    cooldownMinutes: 30, // 최적화: 15 → 30 (손절 후 시장 안정 대기)
   },
 
   // Trailing stop
@@ -133,8 +133,8 @@ export const CYCLE_RIDER_CONFIG = {
     volumeClimax: {
       enabled: true,
       volumeAvgPeriod: 20,
-      minVolumeMultiple: 3.0, // 3x average
-      minCandleSizeAtr: 2.0, // 2x ATR
+      minVolumeMultiple: 2.5, // 2.5x average (완화: 3.0 → 2.5, 신호 빈도 증가)
+      minCandleSizeAtr: 1.4, // 1.4x ATR (완화: 2.0 → 1.4, 캔들 크기 조건 완화)
       rsiPeriod: 14,
       rsiBuyingClimax: 75,
       rsiSellingClimax: 25,

@@ -50,4 +50,19 @@ export class DualStrategyController {
   async getStatus(): Promise<any> {
     return await this.orchestrator.getStatus();
   }
+
+  /**
+   * Manual scan trigger - run all strategies for all symbols immediately
+   * Useful when system was down and missed scheduled scans
+   */
+  @Post('scan-now')
+  @HttpCode(HttpStatus.OK)
+  async scanNow(): Promise<{ success: boolean; message: string; results: any }> {
+    const results = await this.orchestrator.runManualScan();
+    return {
+      success: true,
+      message: 'Manual scan completed',
+      results,
+    };
+  }
 }
