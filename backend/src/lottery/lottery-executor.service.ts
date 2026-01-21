@@ -316,7 +316,13 @@ export class LotteryExecutorService implements OnModuleInit {
       // 2. 코인 타입별 레버리지 설정
       const coinType = signals.coin_type || 'OTHERS';
       const leverage = this.LEVERAGE_BY_TYPE[coinType] || 35;
-      await this.binanceService.setLeverage(symbol, leverage);
+
+      try {
+        await this.binanceService.setLeverage(symbol, leverage);
+      } catch (leverageError) {
+        this.logger.error(`❌ [Lottery] Leverage setting failed for ${symbol}. ABORTING order. Error: ${leverageError.message}`);
+        return; // 레버리지 설정 실패 시 주문 진행 안 함
+      }
 
       // 3. Calculate quantity with proper rounding
       const notional = this.POSITION_MARGIN * leverage;
@@ -483,7 +489,25 @@ export class LotteryExecutorService implements OnModuleInit {
       this.logger.log(`Stop loss placed for ${order.symbol} @ ${order.stop_loss_price}`);
 
     } catch (error) {
-      this.logger.error(`Failed to place SL for ${order.symbol}: ${error.message}`);
+      this.logger.error(`🚨 [Lottery] SL FAILED for ${order.symbol}: ${error.message}`);
+      this.logger.warn(`🚨 [Lottery] EMERGENCY CLOSE: Closing position ${order.symbol} to prevent unprotected loss`);
+
+      // 긴급 청산 - SL 없이 포지션 유지하면 안 됨
+      try {
+        await this.binanceService.futuresOrder({
+          symbol: order.symbol,
+          side: 'SELL',
+          type: 'MARKET',
+          closePosition: 'true',
+        });
+        this.logger.log(`✅ [Lottery] Emergency close successful for ${order.symbol}`);
+
+        // 상태 업데이트
+        order.status = 'CLOSED';
+        await this.orderRepo.save(order);
+      } catch (closeError) {
+        this.logger.error(`🚨🚨 [Lottery] CRITICAL: Emergency close ALSO failed for ${order.symbol}: ${closeError.message}`);
+      }
     }
   }
 
