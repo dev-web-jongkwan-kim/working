@@ -201,4 +201,38 @@ export class HourSwingSignalService {
   ): Promise<any> {
     return this.fundingExtremes.checkReversalZoneOnly(symbol, candles, currentPrice);
   }
+
+  /**
+   * Detect funding extremes only (for 15m candle close)
+   * This registers active extremes for 1m entry checking without running full HourSwing analysis
+   */
+  async detectFundingExtremesOnly(symbol: string): Promise<TradingSignal | null> {
+    try {
+      const currentPrice = await this.cacheService.getCurrentPrice(symbol);
+      if (!currentPrice) return null;
+
+      const fundingRate = await this.cacheService.getFundingRate(symbol) || 0;
+      const candles = await this.cacheService.getRecentCandles(symbol, '1h', 24);
+      if (!candles || candles.length < 10) return null;
+
+      // This will register active extreme if detected (even if full signal isn't generated)
+      const signal = await this.fundingExtremes.detect(symbol, candles, currentPrice, fundingRate);
+
+      if (signal.detected) {
+        this.logger.log(
+          `[FundingExtremes-15m] ${symbol} ✅ Extreme detected and registered for 1M-Entry`,
+          'HourSwingSignalService',
+        );
+      }
+
+      return signal.detected ? signal : null;
+    } catch (error) {
+      this.logger.error(
+        `Error detecting funding extremes for ${symbol}: ${error.message}`,
+        error.stack,
+        'HourSwingSignalService',
+      );
+      return null;
+    }
+  }
 }

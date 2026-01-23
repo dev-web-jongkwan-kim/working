@@ -84,7 +84,7 @@ export const BOX_RANGE_CONFIG = {
 
     // ADX Conditions (confirm no trend)
     adx: {
-      maxValue: 20, // 최적화: 25 → 18 → 20 (약한 트렌드까지 허용, 일반 기준선)
+      maxValue: 28, // 최적화: 20 → 28 (완벽한 횡보가 아니더라도 박스권이면 진입)
       maxDiDiff: 10, // |+DI - -DI| < 10
       requireDeclining: false, // 최적화: true → false (절대값만 체크, 횡보장 진입 기회 확대)
       slopeLookback: 3, // Check slope over 3 candles
@@ -116,7 +116,7 @@ export const BOX_RANGE_CONFIG = {
   // Entry Conditions
   // ═══════════════════════════════════════════════════════════
   entry: {
-    entryZonePercent: 0.15, // 최적화: 0.10 → 0.15 (진입 기회 1.5배 확대, 상단/하단 15%)
+    entryZonePercent: 0.20, // 최적화: 0.15 → 0.20 (진입 기회 확대, 상단/하단 20%)
 
     // SFP (Sweep/Fake Breakout) Filter
     sfpFilter: {
@@ -167,7 +167,7 @@ export const BOX_RANGE_CONFIG = {
   // SL/TP Settings
   // ═══════════════════════════════════════════════════════════
   slTp: {
-    slBufferAtr: 0.3, // SL = box boundary ± ATR × 0.3
+    slBufferAtr: 0.5, // 최적화: 0.3 → 0.5 ATR (휩소에 의한 잦은 손절 방지)
 
     // 2-stage partial profit taking (aligned with other strategies)
     tp1: {
@@ -231,10 +231,10 @@ export const BOX_RANGE_CONFIG = {
   // ═══════════════════════════════════════════════════════════
   timeFilter: {
     enabled: true,
-    // 최적화: 21:30-23:30 → 20:30-01:30 KST (미 증시 개장 전후 휩소 완전 차단)
+    // 최적화: 20:30-01:30 → 22:00-00:30 KST (미 증시 초반 변동성만 피하고 기회 확보)
     disabledHours: {
-      start: 20.5, // 20:30 KST
-      end: 1.5,    // 01:30 KST (next day) (converted to 24-hour decimal)
+      start: 22.0, // 22:00 KST
+      end: 0.5,    // 00:30 KST (next day) (converted to 24-hour decimal)
     },
     // Time-based size adjustment (removed, using grade-based sizing)
     sessionAdjustment: {

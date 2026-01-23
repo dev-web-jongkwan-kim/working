@@ -109,6 +109,11 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
   private baseUrl: string;
   private wsUrl: string;
 
+  // CRITICAL: Track partial fill timeouts for handling stale partial fills
+  private partialFillTimeouts: Map<number, NodeJS.Timeout> = new Map();
+  private readonly PARTIAL_FILL_TIMEOUT_MS = 30000; // 30 seconds
+  private readonly MIN_POSITION_VALUE_USD = 10; // Minimum $10 to keep position
+
   constructor(
     @InjectRepository(Position)
     private readonly positionRepo: Repository<Position>,
@@ -398,22 +403,67 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
       },
     });
 
-    // Log partial fills for debugging
+    // CRITICAL: Handle partial fills with timeout
     if (order.ot === 'LIMIT' && order.X === 'PARTIALLY_FILLED' && order.x === 'TRADE') {
+      const orderId = order.i;
+      const filledQty = parseFloat(order.z);
+      const fillPrice = parseFloat(order.ap);
+      const isReduceOnly = order.R === true;
+
       this.logger.log(
-        `📊 LIMIT order PARTIAL FILL: ${order.s} ${order.S} - Cumulative: ${order.z}, Last Fill: ${order.l}, OrderId: ${order.i}`,
+        `📊 LIMIT order PARTIAL FILL: ${order.s} ${order.S} - Cumulative: ${filledQty}, Last Fill: ${order.l}, OrderId: ${orderId}`,
         'UserDataStream',
       );
+
+      // Only handle entry orders (not reduce-only close orders)
+      if (!isReduceOnly) {
+        // Start timeout if not already started for this order
+        if (!this.partialFillTimeouts.has(orderId)) {
+          this.logger.warn(
+            `⏱️ Starting ${this.PARTIAL_FILL_TIMEOUT_MS / 1000}s timeout for partial fill: ${order.s} orderId=${orderId}`,
+            'UserDataStream',
+          );
+
+          const timeout = setTimeout(async () => {
+            await this.handlePartialFillTimeout(orderId, order.s, order.S, fillPrice, filledQty);
+          }, this.PARTIAL_FILL_TIMEOUT_MS);
+
+          this.partialFillTimeouts.set(orderId, timeout);
+        }
+      }
     }
 
-    // CRITICAL: Check if this is a LIMIT entry order being filled
-    // FIXED: Only process when FULLY FILLED, not on every partial fill (order.x === 'TRADE')
-    // Bug was: Multiple partial fills would call handleEntryOrderFilled multiple times,
-    // creating position with only first partial fill quantity instead of total
+    // CRITICAL: Check if this is a LIMIT order being filled
+    // Need to distinguish between ENTRY orders and CLOSE orders (from algo order triggers)
     if (order.ot === 'LIMIT' && order.X === 'FILLED') {
       const fillPrice = parseFloat(order.ap);
       const filledQty = parseFloat(order.z); // Cumulative filled quantity
+      const isReduceOnly = order.R === true; // Reduce-only flag indicates closing order
 
+      // CRITICAL: Clear partial fill timeout if order is now fully filled
+      const orderId = order.i;
+      if (this.partialFillTimeouts.has(orderId)) {
+        clearTimeout(this.partialFillTimeouts.get(orderId));
+        this.partialFillTimeouts.delete(orderId);
+        this.logger.log(
+          `✅ Partial fill timeout cleared - order fully filled: ${order.s} orderId=${orderId}`,
+          'UserDataStream',
+        );
+      }
+
+      // Check if this LIMIT order is closing an existing position
+      // Algo orders (STOP/TAKE_PROFIT) trigger as LIMIT orders with reduceOnly=true
+      if (isReduceOnly) {
+        this.logger.log(
+          `🎯 LIMIT close order FILLED (reduceOnly): ${order.s} ${order.S} @ ${fillPrice}, Qty: ${filledQty}, OrderId: ${order.i}`,
+          'UserDataStream',
+        );
+        // Treat as TP/SL fill - algo order triggered
+        await this.handleTpSlFilled(order);
+        return;
+      }
+
+      // Not reduce-only, so this is an entry order
       this.logger.log(
         `🎯 LIMIT entry order FULLY FILLED: ${order.s} ${order.S} @ ${fillPrice}, Total Qty: ${filledQty}, OrderId: ${order.i}`,
         'UserDataStream',
@@ -424,7 +474,7 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Check if this is a TP/SL order being filled
+    // Check if this is a TP/SL order being filled (STOP_MARKET, TAKE_PROFIT_MARKET)
     // FIXED: Only process when FULLY FILLED to avoid duplicate processing of partial fills
     if (
       (order.ot === 'TAKE_PROFIT_MARKET' || order.ot === 'STOP_MARKET' || order.ot === 'TAKE_PROFIT') &&
@@ -437,6 +487,201 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
     // Handle MARKET order that might be closing a position (external close or manual)
     if (order.ot === 'MARKET' && order.X === 'FILLED') {
       await this.handleMarketOrderFilled(order);
+    }
+  }
+
+  /**
+   * CRITICAL: Handle partial fill timeout
+   * Called when a LIMIT entry order is partially filled but not fully filled within timeout
+   *
+   * Logic:
+   * 1. Cancel remaining unfilled order
+   * 2. Check if filled value >= $10
+   * 3. If yes: Set SL/TP based on filled quantity
+   * 4. If no: Close position immediately (too small to manage)
+   */
+  private async handlePartialFillTimeout(
+    orderId: number,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    avgFillPrice: number,
+    filledQty: number,
+  ): Promise<void> {
+    this.logger.warn(
+      `⏱️ Partial fill TIMEOUT: ${symbol} orderId=${orderId} - Processing partial fill...`,
+      'UserDataStream',
+    );
+
+    // Remove from tracking
+    this.partialFillTimeouts.delete(orderId);
+
+    try {
+      // 1. Get latest order status from Binance to get accurate fill info
+      const orderStatus = await this.getOrderStatus(symbol, orderId);
+
+      if (!orderStatus) {
+        this.logger.error(
+          `Failed to get order status for partial fill: ${symbol} orderId=${orderId}`,
+          '',
+          'UserDataStream',
+        );
+        return;
+      }
+
+      // Check if order was fully filled while we were waiting
+      if (orderStatus.status === 'FILLED') {
+        this.logger.log(
+          `✅ Order was fully filled before timeout processing: ${symbol} orderId=${orderId}`,
+          'UserDataStream',
+        );
+        // Let the normal FILLED handler deal with it
+        return;
+      }
+
+      const actualFilledQty = parseFloat(orderStatus.executedQty);
+      const actualAvgPrice = parseFloat(orderStatus.avgPrice);
+      const originalQty = parseFloat(orderStatus.origQty);
+
+      this.logger.log(
+        `📊 Partial fill status: ${symbol} - Filled: ${actualFilledQty}/${originalQty} @ ${actualAvgPrice}`,
+        'UserDataStream',
+      );
+
+      // 2. Cancel remaining unfilled order
+      if (orderStatus.status === 'NEW' || orderStatus.status === 'PARTIALLY_FILLED') {
+        await this.cancelOrder(symbol, orderId);
+        this.logger.log(
+          `🚫 Cancelled unfilled portion: ${symbol} orderId=${orderId}`,
+          'UserDataStream',
+        );
+      }
+
+      // 3. Check if we have any fill at all
+      if (actualFilledQty <= 0) {
+        this.logger.warn(
+          `No fill detected for ${symbol} orderId=${orderId} - nothing to process`,
+          'UserDataStream',
+        );
+        return;
+      }
+
+      // 4. Calculate position value
+      const positionValueUsd = actualFilledQty * actualAvgPrice;
+
+      this.logger.log(
+        `💰 Partial fill value: $${positionValueUsd.toFixed(2)} (min: $${this.MIN_POSITION_VALUE_USD})`,
+        'UserDataStream',
+      );
+
+      // 5. Delegate to OrderExecutorService to handle partial fill
+      // This will set SL/TP if value >= $10, or close immediately if < $10
+      await this.orderExecutor.handlePartialFill(
+        orderId,
+        symbol,
+        side === 'BUY' ? 'LONG' : 'SHORT',
+        actualAvgPrice,
+        actualFilledQty,
+        positionValueUsd,
+        this.MIN_POSITION_VALUE_USD,
+      );
+
+    } catch (error) {
+      this.logger.error(
+        `Error handling partial fill timeout: ${symbol} orderId=${orderId} - ${error.message}`,
+        error.stack,
+        'UserDataStream',
+      );
+    }
+  }
+
+  /**
+   * Get order status from Binance
+   */
+  private async getOrderStatus(symbol: string, orderId: number): Promise<any> {
+    try {
+      const timestamp = Date.now();
+      const params = new URLSearchParams({
+        symbol,
+        orderId: orderId.toString(),
+        timestamp: timestamp.toString(),
+      });
+
+      const signature = this.createSignature(params.toString());
+      params.append('signature', signature);
+
+      const response = await fetch(`${this.baseUrl}/fapi/v1/order?${params.toString()}`, {
+        method: 'GET',
+        headers: {
+          'X-MBX-APIKEY': this.apiKey,
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        this.logger.error(
+          `Failed to get order status: ${errorData.msg}`,
+          '',
+          'UserDataStream',
+        );
+        return null;
+      }
+
+      return await response.json();
+    } catch (error) {
+      this.logger.error(
+        `Error getting order status: ${error.message}`,
+        error.stack,
+        'UserDataStream',
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Cancel an order on Binance
+   */
+  private async cancelOrder(symbol: string, orderId: number): Promise<boolean> {
+    try {
+      const timestamp = Date.now();
+      const params = new URLSearchParams({
+        symbol,
+        orderId: orderId.toString(),
+        timestamp: timestamp.toString(),
+      });
+
+      const signature = this.createSignature(params.toString());
+      params.append('signature', signature);
+
+      const response = await fetch(`${this.baseUrl}/fapi/v1/order?${params.toString()}`, {
+        method: 'DELETE',
+        headers: {
+          'X-MBX-APIKEY': this.apiKey,
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        // Ignore "Unknown order" error - order may have been fully filled or already cancelled
+        if (errorData.code === -2011) {
+          this.logger.log(`Order already cancelled or filled: ${symbol} orderId=${orderId}`, 'UserDataStream');
+          return true;
+        }
+        this.logger.error(
+          `Failed to cancel order: ${errorData.msg}`,
+          '',
+          'UserDataStream',
+        );
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `Error cancelling order: ${error.message}`,
+        error.stack,
+        'UserDataStream',
+      );
+      return false;
     }
   }
 
@@ -473,12 +718,58 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      // Determine close reason
+      // Define at function level for use in metadata
+      const entryPrice = parseFloat(position.entry_price.toString());
+      const exitPrice = filledPrice;
+
+      // Determine close reason by matching order ID first, then by price proximity, then by order type
       let closeReason: CloseReason;
       let partialClose = false;
+      const orderId = order.i?.toString() || order.c || ''; // Order ID or client order ID
 
-      if (orderType === 'TAKE_PROFIT_MARKET' || orderType === 'TAKE_PROFIT') {
-        // Check if TP1 or TP2
+      // Get stored prices for comparison
+      const slPrice = parseFloat(position.sl_price?.toString() || '0');
+      const tp1Price = parseFloat(position.tp1_price?.toString() || '0');
+      const tp2Price = parseFloat(position.tp2_price?.toString() || '0');
+
+      // Price tolerance for matching (0.5% to account for slippage)
+      const priceTolerance = 0.005;
+      const isNearSl = slPrice > 0 && Math.abs(filledPrice - slPrice) / slPrice < priceTolerance;
+      const isNearTp1 = tp1Price > 0 && Math.abs(filledPrice - tp1Price) / tp1Price < priceTolerance;
+      const isNearTp2 = tp2Price > 0 && Math.abs(filledPrice - tp2Price) / tp2Price < priceTolerance;
+
+      // CRITICAL: Match order ID to stored SL/TP order IDs for accurate tracking
+      if (position.sl_order_id && orderId.includes(position.sl_order_id)) {
+        closeReason = CloseReason.STOP_LOSS;
+        this.logger.log(`✅ SL order matched by ID: ${orderId}`, 'UserDataStream');
+      } else if (position.tp1_order_id && orderId.includes(position.tp1_order_id)) {
+        closeReason = CloseReason.TP1;
+        partialClose = true;
+        position.tp1_filled = true;
+        this.logger.log(`✅ TP1 order matched by ID: ${orderId}`, 'UserDataStream');
+      } else if (position.tp2_order_id && orderId.includes(position.tp2_order_id)) {
+        closeReason = CloseReason.TP2;
+        this.logger.log(`✅ TP2 order matched by ID: ${orderId}`, 'UserDataStream');
+      } else if (orderType === 'LIMIT' && (isNearSl || isNearTp1 || isNearTp2)) {
+        // LIMIT order from algo trigger - match by price proximity
+        if (isNearSl) {
+          closeReason = CloseReason.STOP_LOSS;
+          this.logger.log(`✅ SL matched by price: filled=${filledPrice}, sl=${slPrice}`, 'UserDataStream');
+        } else if (isNearTp1 && !position.tp1_filled) {
+          closeReason = CloseReason.TP1;
+          partialClose = true;
+          position.tp1_filled = true;
+          this.logger.log(`✅ TP1 matched by price: filled=${filledPrice}, tp1=${tp1Price}`, 'UserDataStream');
+        } else if (isNearTp2) {
+          closeReason = CloseReason.TP2;
+          this.logger.log(`✅ TP2 matched by price: filled=${filledPrice}, tp2=${tp2Price}`, 'UserDataStream');
+        } else {
+          // TP1 already filled, treat as TP2
+          closeReason = CloseReason.TP2;
+          this.logger.log(`✅ TP2 matched by price (TP1 filled): filled=${filledPrice}`, 'UserDataStream');
+        }
+      } else if (orderType === 'TAKE_PROFIT_MARKET' || orderType === 'TAKE_PROFIT') {
+        // Fallback: Check by order type if ID matching fails
         if (!position.tp1_filled) {
           closeReason = CloseReason.TP1;
           partialClose = true;
@@ -486,26 +777,49 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
         } else {
           closeReason = CloseReason.TP2;
         }
-      } else {
+        this.logger.log(`⚠️ TP order matched by type (ID not matched): ${orderId}`, 'UserDataStream');
+      } else if (orderType === 'STOP_MARKET' || orderType === 'STOP') {
         closeReason = CloseReason.STOP_LOSS;
+        this.logger.log(`⚠️ SL order matched by type: ${orderId}`, 'UserDataStream');
+      } else {
+        // Final fallback for LIMIT orders - determine by price vs entry
+        const isLoss = (position.direction === 'LONG' && filledPrice < entryPrice) ||
+                       (position.direction === 'SHORT' && filledPrice > entryPrice);
+        closeReason = isLoss ? CloseReason.STOP_LOSS : CloseReason.TP1;
+        if (!isLoss && !position.tp1_filled) {
+          partialClose = true;
+          position.tp1_filled = true;
+        }
+        this.logger.log(`⚠️ Close reason determined by P&L direction: ${closeReason} (price=${filledPrice}, entry=${entryPrice})`, 'UserDataStream');
       }
 
-      // Calculate P&L
-      const direction = position.direction;
-      const entryPrice = parseFloat(position.entry_price.toString());
-      const exitPrice = filledPrice;
-      const quantity = filledQty;
-      const leverage = position.leverage;
+      // CRITICAL: Use Binance's realized profit directly (already includes fees and leverage)
+      // order.rp contains the actual realized PNL from Binance - this is the source of truth
+      const binancePnl = realizedProfit;
+      const marginUsd = parseFloat(position.margin_usd.toString());
 
-      const pnlUsd = this.calculatePnL(
-        direction,
-        entryPrice,
-        exitPrice,
-        quantity,
-        leverage,
-      );
+      // Only calculate as fallback if Binance doesn't provide profit
+      let pnlUsd: number;
+      if (!isNaN(binancePnl) && binancePnl !== 0) {
+        pnlUsd = binancePnl;
+        this.logger.log(
+          `💰 Using Binance realizedProfit: $${binancePnl.toFixed(4)}`,
+          'UserDataStream',
+        );
+      } else {
+        // Fallback: Calculate manually (without leverage - Binance profit doesn't need it)
+        const direction = position.direction;
+        const priceDiff = direction === 'LONG'
+          ? exitPrice - entryPrice
+          : entryPrice - exitPrice;
+        pnlUsd = priceDiff * filledQty;
+        this.logger.warn(
+          `⚠️ Binance realizedProfit unavailable, calculated: $${pnlUsd.toFixed(4)}`,
+          'UserDataStream',
+        );
+      }
 
-      const pnlPercent = (pnlUsd / parseFloat(position.margin_usd.toString())) * 100;
+      const pnlPercent = (pnlUsd / marginUsd) * 100;
 
       this.logger.log(
         `Position P&L: $${pnlUsd.toFixed(2)} (${pnlPercent.toFixed(2)}%)`,
@@ -520,19 +834,22 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
             `📊 TP1 Partial Close - ${symbol}: ` +
             `Position Size: ${position.position_size}, ` +
             `Current Remaining: ${position.remaining_size}, ` +
-            `Filled Qty: ${filledQty}`,
+            `Filled Qty: ${filledQty}, ` +
+            `Binance PnL: $${pnlUsd.toFixed(2)}`,
             'UserDataStream',
           );
 
           const remainingQty = parseFloat(position.remaining_size.toString()) - filledQty;
+          const newRealizedPnl = parseFloat(position.realized_pnl.toString()) + pnlUsd;
+
           position.remaining_size = remainingQty.toString() as any;
-          position.realized_pnl = (parseFloat(position.realized_pnl.toString()) + pnlUsd).toString() as any;
+          position.realized_pnl = newRealizedPnl.toString() as any;
           position.last_update_time = new Date();
 
           await manager.save(Position, position);
 
           this.logger.log(
-            `💰 TP1 Updated - ${symbol}: New Remaining: ${remainingQty}, P&L: $${pnlUsd.toFixed(2)}`,
+            `💰 TP1 Updated - ${symbol}: Remaining: ${remainingQty.toFixed(4)}, Realized PnL: $${newRealizedPnl.toFixed(2)} (${(newRealizedPnl / marginUsd * 100).toFixed(2)}%)`,
             'UserDataStream',
           );
 
@@ -541,7 +858,7 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
             positionId: position.position_id,
             symbol: position.symbol,
             remainingSize: remainingQty,
-            realizedPnl: parseFloat(position.realized_pnl.toString()),
+            realizedPnl: newRealizedPnl,
             tp1Filled: true,
           });
 
@@ -552,22 +869,19 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
             `Position Size: ${position.position_size}, ` +
             `Remaining: ${position.remaining_size}, ` +
             `Filled Qty: ${filledQty}, ` +
-            `Exit Price: ${exitPrice}`,
+            `Exit Price: ${filledPrice}`,
             'UserDataStream',
           );
 
-          // CRITICAL: Use Binance's realized profit for accuracy
-          // order.rp contains the actual realized PNL from Binance
-          const binancePnl = realizedProfit;
-          const finalPnl = parseFloat(position.realized_pnl.toString()) + (isNaN(binancePnl) || binancePnl === 0 ? pnlUsd : binancePnl);
-          const finalPnlPercent = (finalPnl / parseFloat(position.margin_usd.toString())) * 100;
+          // Add this close's PnL to any previously realized PnL (from partial closes)
+          const previousRealizedPnl = parseFloat(position.realized_pnl.toString()) || 0;
+          const finalPnl = previousRealizedPnl + pnlUsd;
+          const finalPnlPercent = (finalPnl / marginUsd) * 100;
 
-          if (!isNaN(binancePnl) && binancePnl !== 0) {
-            this.logger.log(
-              `💰 Using Binance realizedProfit: $${binancePnl.toFixed(2)} (Calculated: $${pnlUsd.toFixed(2)})`,
-              'UserDataStream',
-            );
-          }
+          this.logger.log(
+            `💰 Final P&L: $${finalPnl.toFixed(2)} (prev: $${previousRealizedPnl.toFixed(2)} + this: $${pnlUsd.toFixed(2)})`,
+            'UserDataStream',
+          );
 
           position.status = PositionStatus.CLOSED;
           position.remaining_size = '0' as any;
@@ -582,7 +896,7 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
             { trade_id: position.trade_id },
             {
               status: TradeStatus.CLOSED,
-              exit_price: exitPrice.toString() as any,
+              exit_price: filledPrice.toString() as any,
               exit_time: new Date(),
               close_reason: closeReason,
               pnl_usd: finalPnl.toString() as any,
@@ -591,7 +905,7 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
           );
 
           this.logger.log(
-            `✅ Position CLOSED: ${symbol} @ ${exitPrice}, P&L: $${finalPnl.toFixed(2)} (${closeReason})`,
+            `✅ Position CLOSED: ${symbol} @ ${filledPrice}, P&L: $${finalPnl.toFixed(2)} (${finalPnlPercent.toFixed(2)}%) [${closeReason}]`,
             'UserDataStream',
           );
 
@@ -1071,5 +1385,15 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
    */
   isConnected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Create HMAC SHA256 signature for Binance API
+   */
+  private createSignature(queryString: string): string {
+    return crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(queryString)
+      .digest('hex');
   }
 }

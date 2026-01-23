@@ -42,7 +42,7 @@ interface LotteryCandidate {
 export class LotteryExecutorService implements OnModuleInit {
   private readonly logger = new Logger(LotteryExecutorService.name);
 
-  private readonly MAX_POSITIONS = 3; // 로터리 시스템, 항상 3개 유지 (최적화: 2 → 3)
+  private readonly MAX_POSITIONS = 1; // 로터리 시스템, 1개만 유지
   private readonly POSITION_MARGIN = 20; // USDT (최적화: 15 → 20)
   private readonly STOP_LOSS_PCT = 0.03; // 3% (진입가 대비)
   private isEnabled = false; // 매매 시작 플래그

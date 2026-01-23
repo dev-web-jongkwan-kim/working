@@ -425,8 +425,18 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         if (boxRangeCount < BOX_RANGE_CONFIG.position.maxPositions) {
           await this.runBoxRangeForSymbol(event.symbol, regime, positions);
         }
+
+        // PRIORITY 3: Funding Extremes detection (register for 1M-Entry checking)
+        // Note: This only detects and registers extremes, actual entry is via 1M candle checks
+        await this.hourSwingSignal.detectFundingExtremesOnly(event.symbol);
+
+        // PRIORITY 4: Hour Swing strategy (also runs on 15m for more frequent signal checking)
+        const hourSwingCount = positions.filter((p) => p.strategy_type === 'HOUR_SWING').length;
+        if (hourSwingCount < HOUR_SWING_CONFIG.position.maxPositions) {
+          await this.runHourSwingForSymbol(event.symbol, regime, positions, weights.hourSwing);
+        }
       } else if (event.timeframe === '1h') {
-        // Hour Swing strategy (runs on 1h timeframe)
+        // Hour Swing strategy (also runs on 1h for additional coverage)
         const hourSwingCount = positions.filter((p) => p.strategy_type === 'HOUR_SWING').length;
         if (hourSwingCount < HOUR_SWING_CONFIG.position.maxPositions) {
           await this.runHourSwingForSymbol(event.symbol, regime, positions, weights.hourSwing);

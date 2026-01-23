@@ -97,6 +97,16 @@ export class Position {
   @Column('boolean', { default: false })
   tp2_filled: boolean;
 
+  // SL/TP Order IDs (for tracking fills)
+  @Column({ nullable: true })
+  sl_order_id: string;
+
+  @Column({ nullable: true })
+  tp1_order_id: string;
+
+  @Column({ nullable: true })
+  tp2_order_id: string;
+
   // Trailing stop
   @Column('boolean', { default: false })
   trailing_enabled: boolean;

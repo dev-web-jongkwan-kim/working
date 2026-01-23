@@ -76,27 +76,29 @@ export class SqueezeDetectorService {
     );
 
     // 2. Check RVol (Relative Volume) - require strong volume on breakout
+    const minRvol = this.config.minRvol || 1.5;
     const rvolData = Indicators.calculateRVol(candles, 20);
 
     this.logger.debug(
-      `[Squeeze] ${symbol} RVol check: ${rvolData.rvol.toFixed(2)} (min=1.5)`,
+      `[Squeeze] ${symbol} RVol check: ${rvolData.rvol.toFixed(2)} (min=${minRvol})`,
       'SqueezeDetector',
     );
 
-    if (rvolData.rvol < 1.5) {
+    if (rvolData.rvol < minRvol) {
       // Volume too low for squeeze breakout, skip
       return { detected: false } as any;
     }
 
     // 3. Check ADX (trend strength) - require moderate to strong trend
+    const minAdx = this.config.minAdx || 18;
     const adxData = Indicators.calculateAdx(candles, 14);
 
     this.logger.debug(
-      `[Squeeze] ${symbol} ADX check: ${adxData.adx.toFixed(2)} (min=20)`,
+      `[Squeeze] ${symbol} ADX check: ${adxData.adx.toFixed(2)} (min=${minAdx})`,
       'SqueezeDetector',
     );
 
-    if (adxData.adx < 20) {
+    if (adxData.adx < minAdx) {
       // Trend too weak for squeeze breakout, skip
       return { detected: false } as any;
     }

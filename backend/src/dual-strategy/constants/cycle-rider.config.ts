@@ -6,7 +6,7 @@
 export const CYCLE_RIDER_CONFIG = {
   // Position management
   position: {
-    leverage: 10, // 최적화: 15 → 10 (추세 전략은 되돌림 견딜 여유 필요)
+    leverage: 15, // 최적화: 10 → 15 (소액 시드, 추세 확인 시 비중 확대)
     marginUsd: 50,
     maxPositions: 5, // 최적화: 3 → 5 (강세장 기회비용 감소)
     maxSameDirection: 3, // maxPositions 증가에 따라 조정
@@ -133,7 +133,7 @@ export const CYCLE_RIDER_CONFIG = {
     volumeClimax: {
       enabled: true,
       volumeAvgPeriod: 20,
-      minVolumeMultiple: 2.5, // 2.5x average (완화: 3.0 → 2.5, 신호 빈도 증가)
+      minVolumeMultiple: 2.0, // 최적화: 2.5 → 2.0 (진입 기회 확대 + 노이즈 필터 균형)
       minCandleSizeAtr: 1.4, // 1.4x ATR (완화: 2.0 → 1.4, 캔들 크기 조건 완화)
       rsiPeriod: 14,
       rsiBuyingClimax: 75,
@@ -148,7 +148,7 @@ export const CYCLE_RIDER_CONFIG = {
       tpSl: {
         slAtrMultiple: 1.0,
         tp1RR: 1.5, // 1.5 R:R (최적화: 피보나치 → R:R 기반)
-        tp2RR: 2.5, // 2.5 R:R (다른 Cycle Rider 전략과 일관성)
+        tp2RR: 4.0, // 최적화: 2.5 → 4.0 (크게 먹는 구간에서 끝까지 홀딩)
         useTrailing: false,
       },
     },
@@ -163,6 +163,8 @@ export const CYCLE_RIDER_CONFIG = {
       minSqueezeBars: 6,
       momentumPeriod: 12,
       minMomentumStrength: 30,
+      minAdx: 18, // 최적화: 20 → 18 (추세 형성 초기 단계에서 미리 진입)
+      minRvol: 1.5, // 볼륨 배수 최소값
       tpSl: {
         slAtrMultiple: 1.0,
         tp1AtrMultiple: 2.0,

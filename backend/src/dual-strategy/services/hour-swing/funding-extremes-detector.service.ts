@@ -251,13 +251,13 @@ export class FundingExtremesDetectorService {
       const recentLows = swingPoints.lows.slice(-3).map(idx => candles[idx].low);
       const lowestLow = Math.min(...recentLows);
 
-      // Price should be within 2% of the lowest low (near support)
-      const nearLowThreshold = lowestLow * 1.02; // 102% of low
+      // Price should be within 3% of the lowest low (near support) - 최적화: 2% → 3% (보수적 완화)
+      const nearLowThreshold = lowestLow * 1.03; // 103% of low
 
       this.logger.debug(
         `[FundingExtremes] ${symbol} Structure check (LONG - Contrarian): ` +
           `currentPrice=${currentPrice.toFixed(2)}, lowestLow=${lowestLow.toFixed(2)}, ` +
-          `threshold=${nearLowThreshold.toFixed(2)} (need <= 102% of low)`,
+          `threshold=${nearLowThreshold.toFixed(2)} (need <= 103% of low)`,
         'FundingExtremesDetector',
       );
 
@@ -450,7 +450,7 @@ export class FundingExtremesDetectorService {
     } else if (!structureBreak.broken) {
       // Normal case: require reversal zone
       this.logger.debug(
-        `[1M-Entry] ${symbol} Not at reversal zone yet (need ${extreme.direction === 'SHORT' ? '≥98% of high' : '≤102% of low'})`,
+        `[1M-Entry] ${symbol} Not at reversal zone yet (need ${extreme.direction === 'SHORT' ? '≥98% of high' : '≤103% of low'})`,
         'FundingExtremesDetector',
       );
       return null;

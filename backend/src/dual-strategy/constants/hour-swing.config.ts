@@ -6,7 +6,7 @@
 export const HOUR_SWING_CONFIG = {
   // Position management
   position: {
-    leverage: 20, // 최적화: 12 → 10 → 20 (마진 증가)
+    leverage: 12, // 최적화: 20 → 12 (스윙은 변동성에 취약하므로 레버리지 낮추고 버팀)
     marginUsd: 30, // 최적화: 15 → 30 (거래 빈도 증가 대응)
     maxPositions: 5,
     maxSameDirection: 3,
@@ -109,8 +109,8 @@ export const HOUR_SWING_CONFIG = {
       enabled: true,
       rsPeriod: 12, // 최적화: 24 → 12 hours (단기 주도주 포착 민감도 상향)
       rsTimeframe: '1h',
-      topRsCount: 10,
-      bottomRsCount: 10,
+      topRsCount: 15, // 최적화: 10 → 15 (대상 종목 확대, 매매 횟수 증대)
+      bottomRsCount: 15, // 최적화: 10 → 15
       btcTurnConfirmBars: 2,
       btcEmaFast: 7,
       btcEmaSlow: 20,
@@ -129,8 +129,8 @@ export const HOUR_SWING_CONFIG = {
       enabled: true,
       fundingHistoryPeriod: 168, // 7 days (hours)
       extremeZScore: 2.0, // 2 standard deviations (유지)
-      extremeHighAbsolute: 0.001, // 0.1%
-      extremeLowAbsolute: -0.001,
+      extremeHighAbsolute: 0.0005, // 최적화: 0.1% → 0.05% (펀딩비가 조금만 치우쳐도 반전 기회 포착)
+      extremeLowAbsolute: -0.0005, // 최적화: -0.1% → -0.05%
       momentumSlowingBars: 2, // 최적화: 3 → 2 (92% 차단 해소, 모멘텀 반전 조기 포착)
       rsiOverbought: 70,
       rsiOversold: 30,

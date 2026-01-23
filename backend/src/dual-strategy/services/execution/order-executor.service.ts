@@ -274,8 +274,9 @@ export class OrderExecutorService {
       // 6. Place SL/TP orders using Binance Algo Order API
       // CRITICAL: Must use Binance orders, not client-side monitoring
       // Server can crash anytime, so Binance must handle SL/TP
+      let slTpOrderIds: { slOrderId: string; tp1OrderId: string; tp2OrderId: string };
       try {
-        await this.placeSlTpOrders(
+        slTpOrderIds = await this.placeSlTpOrders(
           request.symbol,
           request.direction,
           actualQuantity,
@@ -456,7 +457,7 @@ export class OrderExecutorService {
           metadata: request.metadata,
         });
 
-        // 9. Create position record
+        // 9. Create position record with SL/TP order IDs for tracking
         await manager.save(Position, {
           position_id: positionId,
           trade_id: tradeId,
@@ -473,6 +474,9 @@ export class OrderExecutorService {
           sl_price: recalculatedPrices.slPrice,
           tp1_price: recalculatedPrices.tp1Price,
           tp2_price: recalculatedPrices.tp2Price,
+          sl_order_id: slTpOrderIds.slOrderId,
+          tp1_order_id: slTpOrderIds.tp1OrderId,
+          tp2_order_id: slTpOrderIds.tp2OrderId,
           status: PositionStatus.ACTIVE,
           tp1_filled: false,
           tp2_filled: false,
@@ -917,6 +921,7 @@ export class OrderExecutorService {
   /**
    * Place SL and TP orders with retry logic
    * Retries with progressively wider SL/TP if placement fails
+   * Returns order IDs for tracking
    */
   private async placeSlTpOrders(
     symbol: string,
@@ -925,7 +930,7 @@ export class OrderExecutorService {
     slPrice: number,
     tp1Price: number,
     tp2Price: number,
-  ): Promise<void> {
+  ): Promise<{ slOrderId: string; tp1OrderId: string; tp2OrderId: string }> {
     const closeSide = direction === 'LONG' ? 'SELL' : 'BUY';
     const halfQuantity = await this.exchangeInfo.roundQuantity(quantity / 2, symbol);
 
@@ -978,7 +983,7 @@ export class OrderExecutorService {
         // Standard /fapi/v1/order endpoint no longer supports STOP/TAKE_PROFIT
 
         // 1. Stop Loss order (full position) - Algo Order with STOP type
-        await this.placeAlgoOrder({
+        const slResponse = await this.placeAlgoOrder({
           symbol,
           side: closeSide,
           type: 'STOP',
@@ -988,14 +993,15 @@ export class OrderExecutorService {
           timeInForce: 'GTC',
           reduceOnly: 'true',
         });
+        const slOrderId = slResponse.clientAlgoId || slResponse.algoId || '';
         this.logger.log(
-          `Stop Loss order placed (STOP) at ${adjustedSlPrice}` +
+          `Stop Loss order placed (STOP) at ${adjustedSlPrice}, orderId=${slOrderId}` +
           (attempt > 1 ? ` (retry ${attempt}, widened)` : ''),
           'OrderExecutor',
         );
 
         // 2. TP1 order (50%) - Algo Order with TAKE_PROFIT type
-        await this.placeAlgoOrder({
+        const tp1Response = await this.placeAlgoOrder({
           symbol,
           side: closeSide,
           type: 'TAKE_PROFIT',
@@ -1005,14 +1011,15 @@ export class OrderExecutorService {
           timeInForce: 'GTC',
           reduceOnly: 'true',
         });
+        const tp1OrderId = tp1Response.clientAlgoId || tp1Response.algoId || '';
         this.logger.log(
-          `TP1 order placed (TAKE_PROFIT) at ${adjustedTp1Price}, qty=${halfQuantity}` +
+          `TP1 order placed (TAKE_PROFIT) at ${adjustedTp1Price}, qty=${halfQuantity}, orderId=${tp1OrderId}` +
           (attempt > 1 ? ` (retry ${attempt}, widened)` : ''),
           'OrderExecutor',
         );
 
         // 3. TP2 order (remaining 50%) - Algo Order with TAKE_PROFIT type
-        await this.placeAlgoOrder({
+        const tp2Response = await this.placeAlgoOrder({
           symbol,
           side: closeSide,
           type: 'TAKE_PROFIT',
@@ -1022,14 +1029,15 @@ export class OrderExecutorService {
           timeInForce: 'GTC',
           reduceOnly: 'true',
         });
+        const tp2OrderId = tp2Response.clientAlgoId || tp2Response.algoId || '';
         this.logger.log(
-          `TP2 order placed (TAKE_PROFIT) at ${adjustedTp2Price}, qty=${halfQuantity}` +
+          `TP2 order placed (TAKE_PROFIT) at ${adjustedTp2Price}, qty=${halfQuantity}, orderId=${tp2OrderId}` +
           (attempt > 1 ? ` (retry ${attempt}, widened)` : ''),
           'OrderExecutor',
         );
 
-        // Success - all orders placed
-        return;
+        // Success - all orders placed, return order IDs
+        return { slOrderId, tp1OrderId, tp2OrderId };
 
       } catch (error) {
         lastError = error;
@@ -1576,9 +1584,14 @@ export class OrderExecutorService {
         'OrderExecutor',
       );
 
-      // 2. Place SL/TP orders
+      // 2. Place SL/TP orders and capture order IDs
+      let slTpOrderIds: { slOrderId: string; tp1OrderId: string; tp2OrderId: string } = {
+        slOrderId: '',
+        tp1OrderId: '',
+        tp2OrderId: '',
+      };
       try {
-        await this.placeSlTpOrders(
+        slTpOrderIds = await this.placeSlTpOrders(
           request.symbol,
           request.direction,
           filledQty,
@@ -1725,7 +1738,7 @@ export class OrderExecutorService {
           metadata: request.metadata,
         });
 
-        // Save Position
+        // Save Position with SL/TP order IDs for tracking
         await manager.save(Position, {
           position_id: positionId,
           trade_id: tradeId,
@@ -1738,10 +1751,13 @@ export class OrderExecutorService {
           sl_price: recalculatedPrices.slPrice,
           tp1_price: recalculatedPrices.tp1Price,
           tp2_price: recalculatedPrices.tp2Price,
+          sl_order_id: slTpOrderIds.slOrderId,
+          tp1_order_id: slTpOrderIds.tp1OrderId,
+          tp2_order_id: slTpOrderIds.tp2OrderId,
           leverage: request.leverage,
           margin_usd: request.marginUsd,
           position_size: filledQty,
-          remaining_size: filledQty,  // CRITICAL: 빠진 필드 추가!
+          remaining_size: filledQty,
           status: PositionStatus.ACTIVE,
           tp1_filled: false,
           tp2_filled: false,
@@ -1801,6 +1817,181 @@ export class OrderExecutorService {
         error.stack,
         'OrderExecutor',
       );
+    }
+  }
+
+  /**
+   * CRITICAL: Handle partial fill after timeout
+   * Called when a LIMIT entry order is partially filled but not fully filled within timeout
+   *
+   * @param orderId - Original order ID
+   * @param symbol - Trading symbol
+   * @param direction - LONG or SHORT
+   * @param fillPrice - Average fill price
+   * @param filledQty - Quantity that was filled
+   * @param positionValueUsd - USD value of filled position
+   * @param minValueUsd - Minimum value to keep position (close if below)
+   */
+  async handlePartialFill(
+    orderId: number,
+    symbol: string,
+    direction: string,
+    fillPrice: number,
+    filledQty: number,
+    positionValueUsd: number,
+    minValueUsd: number,
+  ): Promise<void> {
+    this.logger.log(
+      `📊 Processing partial fill: ${symbol} ${direction} - Qty: ${filledQty}, Value: $${positionValueUsd.toFixed(2)}`,
+      'OrderExecutor',
+    );
+
+    // Get pending order info from Redis
+    const pendingOrder = await this.getPendingOrder(orderId);
+
+    if (!pendingOrder) {
+      this.logger.warn(
+        `No pending order found for partial fill: ${symbol} orderId=${orderId}. May have been processed already.`,
+        'OrderExecutor',
+      );
+      return;
+    }
+
+    const { signalId, tradeId, request } = pendingOrder;
+
+    try {
+      // Check if position value is too small
+      if (positionValueUsd < minValueUsd) {
+        this.logger.warn(
+          `⚠️ Partial fill too small ($${positionValueUsd.toFixed(2)} < $${minValueUsd}). Closing immediately.`,
+          'OrderExecutor',
+        );
+
+        // Close the small position immediately
+        await this.emergencyClosePosition(symbol, direction, filledQty);
+
+        // Save trade as closed
+        await this.tradeRepo.save({
+          trade_id: tradeId,
+          signal_id: signalId,
+          strategy_type: request.strategyType,
+          sub_strategy: request.subStrategy,
+          symbol: request.symbol,
+          direction: request.direction as any,
+          entry_price: fillPrice,
+          exit_price: fillPrice,
+          sl_price: request.slPrice,
+          tp1_price: request.tp1Price,
+          tp2_price: request.tp2Price,
+          leverage: request.leverage,
+          margin_usd: positionValueUsd / request.leverage, // Actual margin used
+          position_size: filledQty,
+          entry_time: new Date(),
+          exit_time: new Date(),
+          status: TradeStatus.CLOSED,
+          close_reason: CloseReason.MANUAL,
+          pnl_usd: 0,
+          pnl_percent: 0,
+          confidence: request.confidence,
+          market_regime: request.marketRegime,
+          metadata: {
+            ...request.metadata,
+            partialFill: true,
+            partialFillReason: 'POSITION_TOO_SMALL',
+            originalOrderId: orderId,
+            positionValueUsd,
+            minValueUsd,
+          },
+        });
+
+        // Update signal as rejected
+        await this.signalRepo.update(
+          { signal_id: signalId },
+          {
+            rejected: true,
+            rejection_reason: `Partial fill too small ($${positionValueUsd.toFixed(2)} < $${minValueUsd})`,
+          },
+        );
+
+        // Log the event
+        await this.logger.logStrategy({
+          level: 'warn',
+          strategyType: request.strategyType,
+          subStrategy: request.subStrategy,
+          symbol: request.symbol,
+          eventType: EventType.POSITION_CLOSED,
+          message: `Partial fill closed (too small): $${positionValueUsd.toFixed(2)} < $${minValueUsd}`,
+          tradeId,
+          signalId,
+          metadata: {
+            partialFill: true,
+            filledQty,
+            fillPrice,
+            positionValueUsd,
+          },
+        });
+
+        // Clean up
+        await this.deletePendingOrder(orderId);
+
+        this.logger.log(
+          `✅ Small partial fill closed: ${symbol} orderId=${orderId}`,
+          'OrderExecutor',
+        );
+
+        return;
+      }
+
+      // Position value is sufficient - proceed with SL/TP setup
+      this.logger.log(
+        `✅ Partial fill sufficient ($${positionValueUsd.toFixed(2)} >= $${minValueUsd}). Setting up SL/TP...`,
+        'OrderExecutor',
+      );
+
+      // Use existing handleEntryOrderFilled logic but with partial quantity
+      // This will recalculate SL/TP based on actual fill and set up orders
+      await this.handleEntryOrderFilled(orderId, fillPrice, filledQty);
+
+      // Log the partial fill
+      await this.logger.logStrategy({
+        level: 'info',
+        strategyType: request.strategyType,
+        subStrategy: request.subStrategy,
+        symbol: request.symbol,
+        eventType: EventType.POSITION_OPENED,
+        message: `Partial fill accepted: ${symbol} ${direction} @ ${fillPrice}, Qty: ${filledQty}`,
+        tradeId,
+        signalId,
+        metadata: {
+          partialFill: true,
+          originalQty: request.marginUsd * request.leverage / fillPrice,
+          filledQty,
+          fillPrice,
+          positionValueUsd,
+        },
+      });
+
+    } catch (error) {
+      this.logger.error(
+        `Error handling partial fill: ${symbol} orderId=${orderId} - ${error.message}`,
+        error.stack,
+        'OrderExecutor',
+      );
+
+      // Attempt emergency close as fallback
+      try {
+        this.logger.warn(
+          `🚨 Attempting emergency close after partial fill error: ${symbol}`,
+          'OrderExecutor',
+        );
+        await this.emergencyClosePosition(symbol, direction, filledQty);
+      } catch (closeError) {
+        this.logger.error(
+          `CRITICAL: Emergency close also failed: ${closeError.message}`,
+          closeError.stack,
+          'OrderExecutor',
+        );
+      }
     }
   }
 }
