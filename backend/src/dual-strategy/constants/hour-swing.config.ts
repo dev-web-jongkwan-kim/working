@@ -1,19 +1,32 @@
 /**
  * Strategy B: Hour Swing Configuration
  * Goal: Quick confirmed profits within 1 hour
+ *
+ * [개선 이력]
+ * 2026-01-24: 5연패 원인 분석 후 대폭 개선
+ *   - 레버리지: 12x → 10x (손실 축소)
+ *   - SL 범위: 0.6%~1.5% → 0.8%~2.0% (조기 SL 방지)
+ *   - Regime Filter: WEAK에서도 역방향 차단
+ *   - 풀백 조건: 0.5~1.2 ATR → 0.6~1.0 ATR
+ *   - CVD 확인: 3% → 5%
+ * 2026-01-24 21:10: 6연패 후 마진 추가 축소
+ *   - 마진: $25 → $15 (리스크 40% 감소)
+ * 2026-01-24 (README 스펙 반영):
+ *   - SIDEWAYS 레짐: Hour Swing 완전 OFF
+ *   - Loss-streak Kill Switch: 3연패 → 60분 쿨다운
  */
 
 export const HOUR_SWING_CONFIG = {
   // Position management
   position: {
-    leverage: 12, // 최적화: 20 → 12 (스윙은 변동성에 취약하므로 레버리지 낮추고 버팀)
-    marginUsd: 30, // 최적화: 15 → 30 (거래 빈도 증가 대응)
-    maxPositions: 5,
-    maxSameDirection: 3,
-    minHoldMinutes: 15,
+    leverage: 10, // 개선: 12 → 10 (SL 히트 시 손실 축소)
+    marginUsd: 15, // 개선: 30 → 25 → 15 (6연패 후 추가 축소)
+    maxPositions: 3, // 개선: 5 → 3 (집중도 높임)
+    maxSameDirection: 2, // 개선: 3 → 2
+    minHoldMinutes: 10, // 개선: 15 → 10 (초반 SL 보호용)
     maxHoldMinutes: 60,
     tp1ClosePercent: 50,
-    cooldownMinutes: 10,
+    cooldownMinutes: 15, // 개선: 10 → 15 (연속 손실 방지)
   },
 
   // Breakeven
@@ -36,13 +49,24 @@ export const HOUR_SWING_CONFIG = {
     atrPeriod: 14,
   },
 
-  // Regime filter (NEW: prevent counter-trend entries)
+  // Regime filter (개선: WEAK에서도 역방향 차단)
   regimeFilter: {
     enabled: true,
-    // Block LONG during strong downtrend, SHORT during strong uptrend
+    // Block LONG during downtrend, SHORT during uptrend (WEAK 포함)
     blockCounterTrend: true,
+    blockWeakCounterTrend: true, // 개선: WEAK_UPTREND에서 SHORT, WEAK_DOWNTREND에서 LONG 차단
     // Only allow trades in these regimes (empty = allow all)
-    allowedRegimes: [], // Will filter STRONG_DOWNTREND/UPTREND in code
+    allowedRegimes: [], // Will filter in code
+    // 2026-01-24: SIDEWAYS 완전 OFF (README 스펙 반영)
+    sidewaysOff: true, // SIDEWAYS 레짐에서 Hour Swing 완전 비활성화
+  },
+
+  // 2026-01-24: Loss-streak Kill Switch (README 스펙 반영)
+  // 연속 손절 발생 시 전략 일시 중단
+  lossStreakKillSwitch: {
+    enabled: true,
+    maxConsecutiveLosses: 3, // 3번 연속 SL 히트 시
+    cooldownMinutes: 60, // 60분 쿨다운
   },
 
   // Concurrent entry limit (NEW: prevent multiple entries at same time)
@@ -72,10 +96,11 @@ export const HOUR_SWING_CONFIG = {
       },
       m5: {
         pullbackBars: 3,
-        minPullbackDepthAtr: 0.5, // 최적화: 0.3 → 0.5 (타점 정밀화 - 허수 제거)
-        maxPullbackDepthAtr: 1.2, // 최적화: 1.5 → 1.2 (타점 정밀화 - 허수 제거)
+        minPullbackDepthAtr: 0.6, // 개선: 0.5 → 0.6 (더 깊은 풀백 요구)
+        maxPullbackDepthAtr: 1.0, // 개선: 1.2 → 1.0 (과도한 풀백 = 추세 반전 가능성)
         cvdConfirmBars: 3,
-        cvdMinRatio: 0.03, // 3%
+        cvdMinRatio: 0.05, // 개선: 3% → 5% (CVD 확인 강화)
+        requireConfirmCandle: true, // 개선: 풀백 후 확인봉 필수
       },
       emaFilter: {
         enabled: true,
@@ -96,11 +121,11 @@ export const HOUR_SWING_CONFIG = {
         longOverboughtThreshold: 65, // RSI > 65면 LONG 금지
       },
       tpSl: {
-        slAtrMultiple: 1.0,
-        minSlPercent: 0.006, // 0.6%
-        maxSlPercent: 0.015, // 1.5%
-        tp1RR: 1.2,
-        tp2RR: 1.8,
+        slAtrMultiple: 1.2, // 개선: 1.0 → 1.2 (SL 여유 확보)
+        minSlPercent: 0.008, // 개선: 0.6% → 0.8%
+        maxSlPercent: 0.020, // 개선: 1.5% → 2.0%
+        tp1RR: 1.0, // 개선: 1.2 → 1.0 (TP1 빠르게 확보)
+        tp2RR: 1.5, // 개선: 1.8 → 1.5 (현실적인 목표)
       },
     },
 

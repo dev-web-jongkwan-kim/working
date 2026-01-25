@@ -6,13 +6,14 @@ import * as crypto from 'crypto';
 import * as WebSocket from 'ws';
 import { CustomLoggerService } from '../../../common/logging/custom-logger.service';
 import { Position, PositionStatus } from '../../../entities/position.entity';
-import { Trade, TradeStatus, CloseReason } from '../../../entities/trade.entity';
+import { Trade, TradeStatus, CloseReason, StrategyType } from '../../../entities/trade.entity';
 import { TradingWebSocketGateway } from '../../../websocket/websocket.gateway';
 import { EventType } from '../../../entities/strategy-log.entity';
 import { SystemEventType } from '../../../entities/system-log.entity';
 import { OrderExecutorService } from '../execution/order-executor.service';
 import { RiskManagerService } from '../execution/risk-manager.service';
 import { BinanceService } from './binance.service';
+import { HourSwingSignalService } from '../hour-swing/hour-swing-signal.service';
 
 /**
  * Binance User Data Stream Event Types
@@ -127,6 +128,8 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
     private readonly orderExecutor: OrderExecutorService,
     @Inject(forwardRef(() => RiskManagerService))
     private readonly riskManager: RiskManagerService,
+    @Inject(forwardRef(() => HourSwingSignalService))
+    private readonly hourSwingSignal: HourSwingSignalService,
   ) {
     this.apiKey = this.configService.get('BINANCE_API_KEY');
     this.apiSecret = this.configService.get('BINANCE_SECRET_KEY');
@@ -595,6 +598,129 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * 2026-01-24: Move SL to Breakeven after TP1 hit
+   * Cancels existing SL order and places new SL at entry price + buffer
+   */
+  private async moveSlToBreakeven(
+    position: Position,
+    manager: any,
+  ): Promise<void> {
+    const symbol = position.symbol;
+    const entryPrice = parseFloat(position.entry_price.toString());
+    const remainingQty = parseFloat(position.remaining_size.toString());
+
+    // BE buffer: 0.1% above/below entry
+    const beBuffer = entryPrice * 0.001;
+    const bePrice = position.direction === 'LONG'
+      ? entryPrice + beBuffer
+      : entryPrice - beBuffer;
+
+    this.logger.log(
+      `🎯 Moving SL to BE for ${symbol}: Entry=${entryPrice.toFixed(4)}, ` +
+        `BE Price=${bePrice.toFixed(4)}, Direction=${position.direction}`,
+      'UserDataStream',
+    );
+
+    // 1. Cancel existing SL order
+    if (position.sl_order_id) {
+      try {
+        await this.binanceService.cancelOrder(symbol, parseInt(position.sl_order_id));
+        this.logger.log(
+          `✅ Cancelled old SL order: ${position.sl_order_id}`,
+          'UserDataStream',
+        );
+      } catch (cancelError) {
+        // Order might already be cancelled or filled
+        this.logger.warn(
+          `⚠️ Failed to cancel old SL order ${position.sl_order_id}: ${cancelError.message}`,
+          'UserDataStream',
+        );
+      }
+    }
+
+    // 2. Place new SL at BE price
+    try {
+      const side = position.direction === 'LONG' ? 'SELL' : 'BUY';
+      const newSlOrder = await this.placeStopLossOrder(
+        symbol,
+        side,
+        remainingQty,
+        bePrice,
+      );
+
+      // 3. Update position with new SL price and order ID
+      position.sl_price = bePrice as any;
+      if (newSlOrder?.orderId) {
+        position.sl_order_id = newSlOrder.orderId.toString();
+      }
+      await manager.save(Position, position);
+
+      this.logger.log(
+        `✅ SL moved to BE for ${symbol}: New SL Price=${bePrice.toFixed(4)}, ` +
+          `OrderId=${newSlOrder?.orderId || 'N/A'}`,
+        'UserDataStream',
+      );
+    } catch (placeError) {
+      this.logger.error(
+        `❌ Failed to place new SL at BE for ${symbol}: ${placeError.message}`,
+        placeError.stack,
+        'UserDataStream',
+      );
+      throw placeError;
+    }
+  }
+
+  /**
+   * Place STOP_MARKET order for SL
+   */
+  private async placeStopLossOrder(
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    stopPrice: number,
+  ): Promise<any> {
+    const timestamp = Date.now();
+    const params = new URLSearchParams({
+      symbol,
+      side,
+      type: 'STOP_MARKET',
+      stopPrice: stopPrice.toFixed(this.getPricePrecision(stopPrice)),
+      quantity: quantity.toString(),
+      reduceOnly: 'true',
+      timestamp: timestamp.toString(),
+    });
+
+    const signature = this.createSignature(params.toString());
+    params.append('signature', signature);
+
+    const response = await fetch(`${this.baseUrl}/fapi/v1/order?${params.toString()}`, {
+      method: 'POST',
+      headers: {
+        'X-MBX-APIKEY': this.apiKey,
+      },
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Failed to place SL order: ${errorData.msg}`);
+    }
+
+    return await response.json();
+  }
+
+  /**
+   * Get price precision based on price value
+   */
+  private getPricePrecision(price: number): number {
+    if (price >= 10000) return 1;
+    if (price >= 1000) return 2;
+    if (price >= 100) return 3;
+    if (price >= 10) return 4;
+    if (price >= 1) return 4;
+    return 5;
+  }
+
+  /**
    * Get order status from Binance
    */
   private async getOrderStatus(symbol: string, orderId: number): Promise<any> {
@@ -862,6 +988,17 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
             tp1Filled: true,
           });
 
+          // 2026-01-24: TP1 달성 시 SL을 BE(Breakeven)로 이동
+          try {
+            await this.moveSlToBreakeven(position, manager);
+          } catch (beError) {
+            this.logger.error(
+              `Failed to move SL to BE for ${symbol}: ${beError.message}`,
+              beError.stack,
+              'UserDataStream',
+            );
+          }
+
         } else {
           // Full close
           this.logger.log(
@@ -959,6 +1096,17 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
             `📊 Trade outcome recorded: ${symbol} P&L: $${finalPnl.toFixed(2)}`,
             'UserDataStream',
           );
+
+          // 2026-01-24: Hour Swing Loss-streak Kill Switch
+          // Hour Swing 전략 거래면 손익 결과 기록 (3연패 시 60분 쿨다운)
+          if (position.strategy_type === StrategyType.HOUR_SWING) {
+            const isLoss = finalPnl < 0;
+            this.hourSwingSignal.recordTradeResult(isLoss);
+            this.logger.log(
+              `📊 Hour Swing result recorded: ${isLoss ? '🔴 LOSS' : '🟢 WIN'} (P&L: $${finalPnl.toFixed(2)})`,
+              'UserDataStream',
+            );
+          }
         } catch (riskError) {
           this.logger.error(
             `Failed to record trade outcome for ${symbol}: ${riskError.message}`,
@@ -1099,6 +1247,16 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
               `📊 Trade outcome recorded: ${symbol} P&L: ${finalPnl.toFixed(2)} (EXTERNAL CLOSE)`,
               'UserDataStream',
             );
+
+            // 2026-01-24: Hour Swing Loss-streak Kill Switch (EXTERNAL CLOSE)
+            if (position.strategy_type === StrategyType.HOUR_SWING) {
+              const isLoss = finalPnl < 0;
+              this.hourSwingSignal.recordTradeResult(isLoss);
+              this.logger.log(
+                `📊 Hour Swing result recorded (EXTERNAL): ${isLoss ? '🔴 LOSS' : '🟢 WIN'}`,
+                'UserDataStream',
+              );
+            }
           } catch (riskError) {
             this.logger.error(
               `Failed to record trade outcome for ${symbol}: ${riskError.message}`,
@@ -1259,6 +1417,16 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
     // Record trade outcome for risk management
     try {
       await this.riskManager.recordTradeOutcome(pnl, symbol);
+
+      // 2026-01-24: Hour Swing Loss-streak Kill Switch (SYNC)
+      if (position.strategy_type === StrategyType.HOUR_SWING) {
+        const isLoss = pnl < 0;
+        this.hourSwingSignal.recordTradeResult(isLoss);
+        this.logger.log(
+          `📊 Hour Swing result recorded (SYNC): ${isLoss ? '🔴 LOSS' : '🟢 WIN'}`,
+          'UserDataStream',
+        );
+      }
     } catch (error) {
       this.logger.error(
         `Failed to record trade outcome for ${symbol}: ${error.message}`,

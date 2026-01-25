@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { BOX_RANGE_CONFIG } from '../../constants/box-range.config';
 import { Candle } from '../../interfaces/candle.interface';
-import { BoxRange, SwingPoint, VolumeProfile, BoxGrade, BoxAgeStatus } from '../../interfaces/box.interface';
+import { BoxRange, SwingPoint, VolumeProfile, BoxGrade, BoxAgeStatus, VolumeBoxType } from '../../interfaces/box.interface';
 import { Indicators } from '../../utils/indicators';
 import { CustomLoggerService } from '../../../common/logging/custom-logger.service';
 
@@ -197,18 +197,30 @@ export class BoxDetectorService {
       'BoxDetector',
     );
 
-    if (adx > this.config.adx.maxValue || diDiff > this.config.adx.maxDiDiff) {
+    // 개선: ADX 소프트 블로킹 (극단값에서만 차단)
+    const adxSoftBlockingConfig = (this.config.adx as any).softBlocking;
+    const hardBlockAdx = adxSoftBlockingConfig?.hardBlockAbove || 40;
+
+    if (adx > hardBlockAdx) {
       this.logger.debug(
-        `[BoxDetector] ${symbol} ❌ ADX validation failed: adx=${adx.toFixed(2)} > ${this.config.adx.maxValue} or diDiff=${diDiff.toFixed(2)} > ${this.config.adx.maxDiDiff}`,
+        `[BoxDetector] ${symbol} ❌ ADX too high (hard block): adx=${adx.toFixed(2)} > ${hardBlockAdx}`,
         'BoxDetector',
       );
       return null;
     }
 
-    this.logger.debug(
-      `[BoxDetector] ${symbol} ✅ ADX validation passed: adx=${adx.toFixed(2)} <= ${this.config.adx.maxValue}, diDiff=${diDiff.toFixed(2)} <= ${this.config.adx.maxDiDiff}`,
-      'BoxDetector',
-    );
+    if (adx > this.config.adx.maxValue || diDiff > this.config.adx.maxDiDiff) {
+      // 개선: 차단하지 않고 경고만 (소프트 블로킹)
+      this.logger.debug(
+        `[BoxDetector] ${symbol} ⚠️ ADX elevated (soft blocking): adx=${adx.toFixed(2)}, diDiff=${diDiff.toFixed(2)} - size will be reduced`,
+        'BoxDetector',
+      );
+    } else {
+      this.logger.debug(
+        `[BoxDetector] ${symbol} ✅ ADX validation passed: adx=${adx.toFixed(2)} <= ${this.config.adx.maxValue}, diDiff=${diDiff.toFixed(2)} <= ${this.config.adx.maxDiDiff}`,
+        'BoxDetector',
+      );
+    }
 
 
     if (this.config.adx.requireDeclining && !adxDeclining) {
@@ -219,39 +231,61 @@ export class BoxDetectorService {
       return null;
     }
 
-    // 9. Volume profile validation
+    // 9. Volume profile analysis (개선: 차단 제거 → 등급 점수화만)
     const volumeProfile = this.analyzeVolumeProfile(candles, upper, lower);
 
-    this.logger.debug(
-      `[BoxDetector] ${symbol} Volume profile: centerAvg=${volumeProfile.centerAvg.toFixed(0)}, ` +
-        `edgeAvg=${volumeProfile.edgeAvg.toFixed(0)}, valid=${volumeProfile.isValid}, ratio=${volumeProfile.ratio.toFixed(2)}`,
-      'BoxDetector',
-    );
+    // 박스 타입 분류 (center-dominant, edge-dominant, unstructured)
+    let volumeBoxType: VolumeBoxType = 'UNSTRUCTURED';
+    let volumeScoreAdjustment = 0;
 
-    if (!volumeProfile.isValid) {
-      this.logger.debug(
-        `[BoxDetector] ${symbol} ❌ Volume profile invalid: centerAvg=${volumeProfile.centerAvg.toFixed(0)}, ` +
-          `edgeAvg=${volumeProfile.edgeAvg.toFixed(0)}, ratio=${volumeProfile.ratio.toFixed(2)} ` +
-          `(center should be > ${this.config.volume.centerRatio} of total)`,
-        'BoxDetector',
-      );
-      return null;
+    if (volumeProfile.centerAvg > 0 && volumeProfile.edgeAvg > 0) {
+      const centerToEdgeRatio = volumeProfile.centerAvg / volumeProfile.edgeAvg;
+
+      if (centerToEdgeRatio > 0.6) {
+        volumeBoxType = 'CENTER_DOMINANT';
+        volumeScoreAdjustment = 5; // 중앙 집중형: +5점
+      } else if (volumeProfile.ratio > 1.3) {
+        volumeBoxType = 'EDGE_DOMINANT';
+        volumeScoreAdjustment = 3; // 경계 집중형: +3점 (횡보장에 자연스러움)
+      } else {
+        volumeBoxType = 'UNSTRUCTURED';
+        volumeScoreAdjustment = -5; // 분산형: -5점
+      }
     }
 
     this.logger.debug(
-      `[BoxDetector] ${symbol} ✅ Volume profile valid: center concentration ${volumeProfile.ratio.toFixed(2)}`,
+      `[BoxDetector] ${symbol} Volume profile: centerAvg=${volumeProfile.centerAvg.toFixed(0)}, ` +
+        `edgeAvg=${volumeProfile.edgeAvg.toFixed(0)}, ratio=${volumeProfile.ratio.toFixed(2)}, ` +
+        `type=${volumeBoxType}, scoreAdj=${volumeScoreAdjustment}`,
       'BoxDetector',
     );
 
+    // 개선: Volume Profile은 더 이상 차단하지 않음 (점수에만 반영)
+    if (!volumeProfile.isValid) {
+      this.logger.debug(
+        `[BoxDetector] ${symbol} ⚠️ Volume profile suboptimal (not blocking): type=${volumeBoxType}`,
+        'BoxDetector',
+      );
+    } else {
+      this.logger.debug(
+        `[BoxDetector] ${symbol} ✅ Volume profile: type=${volumeBoxType}`,
+        'BoxDetector',
+      );
+    }
 
-    // 10. Calculate confidence (with height thresholds)
-    const confidence = this.calculateConfidence(
+
+    // 10. Calculate confidence (with height thresholds + volume score adjustment)
+    let confidence = this.calculateConfidence(
       swingHighs.length + swingLows.length,
       adx,
       heightAtrRatio,
       candlesInBox,
       heightThresholds,
     );
+
+    // 개선: Volume Profile 점수 반영
+    confidence += volumeScoreAdjustment;
+    confidence = Math.max(0, Math.min(100, confidence)); // 0-100 범위 유지
 
     this.logger.debug(
       `[BoxDetector] ${symbol} Confidence score: ${confidence.toFixed(1)} ` +
@@ -290,6 +324,32 @@ export class BoxDetectorService {
       'BoxDetector',
     );
 
+    // 개선: ADX 기반 사이즈 조정 계수 계산
+    let adxSizeMultiplier = 1.0;
+    let adxRequireConfirm = false;
+    const adxSoftBlocking = (this.config.adx as any).softBlocking;
+
+    if (adxSoftBlocking?.enabled) {
+      if (adx > (adxSoftBlocking.requireConfirmAbove || 25)) {
+        adxRequireConfirm = true;
+      }
+      if (adx > (adxSoftBlocking.reduceSizeAbove || 28)) {
+        if (adx >= 35) {
+          adxSizeMultiplier = adxSoftBlocking.sizeMultiplierAt35 || 0.5;
+        } else if (adx >= 30) {
+          adxSizeMultiplier = adxSoftBlocking.sizeMultiplierAt30 || 0.7;
+        } else {
+          adxSizeMultiplier = 0.85; // 28-30 사이
+        }
+      }
+    }
+
+    // 개선: 확장 박스(4.5-6 ATR) 여부 확인
+    const expandedBoxConfig = (this.config as any).expandedBox;
+    const isExpandedBox = expandedBoxConfig &&
+      heightAtrRatio >= expandedBoxConfig.minAtr &&
+      heightAtrRatio <= expandedBoxConfig.maxAtr;
+
     return {
       symbol,
       upper,
@@ -313,6 +373,11 @@ export class BoxDetectorService {
       lowDeviation,  // Low swing point deviation
       maxDeviationValue, // Maximum deviation
       isValid: true,
+      // 개선: 추가 메타데이터
+      volumeBoxType,  // CENTER_DOMINANT, EDGE_DOMINANT, UNSTRUCTURED
+      adxSizeMultiplier,  // ADX 기반 사이즈 조정 계수
+      adxRequireConfirm,  // ADX가 높아서 확인봉 필요 여부
+      isExpandedBox,  // 확장 박스 여부 (4.5-6 ATR)
     };
   }
 

@@ -8,6 +8,13 @@ import { SystemEventType } from '../../../entities/system-log.entity';
 import { CandleAnalyzer } from '../../utils/candle-analyzer';
 import { Indicators } from '../../utils/indicators';
 
+/**
+ * Market Regime Configuration
+ *
+ * 2026-01-24 개선 (README 스펙 반영):
+ * - WEAK 재분류 레이어: WEAK 트렌드가 실제로 횡보처럼 작동하면 SIDEWAYS로 재분류
+ *   - ADX < 20 또는 ATR% < 0.4% 이면 SIDEWAYS로 재분류
+ */
 const REGIME_CONFIG = {
   btc: {
     symbol: 'BTCUSDT',
@@ -17,6 +24,13 @@ const REGIME_CONFIG = {
   thresholds: {
     strongTrendStrength: 0.6,
     weakTrendStrength: 0.3,
+  },
+  // 2026-01-24: WEAK 재분류 레이어 (README 스펙 반영)
+  // WEAK 트렌드가 실제로 횡보처럼 작동하면 SIDEWAYS로 재분류
+  weakReclassify: {
+    enabled: true,
+    adxThreshold: 20, // ADX < 20이면 SIDEWAYS로 재분류
+    atrPercentThreshold: 0.004, // ATR% < 0.4%이면 SIDEWAYS로 재분류
   },
   // Strategy weights based on regime
   strategyWeights: {
@@ -89,9 +103,15 @@ export class MarketRegimeClassifierService {
       const btcPrice = btcCandles[btcCandles.length - 1].close;
       const atr = Indicators.calculateAtr(btcCandles, 14);
       const volatility = (atr / btcPrice) * 100;
+      const atrPercent = atr / btcPrice;
+
+      // 2026-01-24: Calculate ADX for WEAK recheck layer
+      const adxResult = Indicators.calculateAdx(btcCandles, 14);
+      const adx = adxResult.adx;
 
       // Classify regime
       let regime: MarketRegime;
+      let reclassifiedFromWeak = false;
 
       if (trend.direction === 'UP') {
         if (trend.strength >= REGIME_CONFIG.thresholds.strongTrendStrength) {
@@ -111,6 +131,30 @@ export class MarketRegimeClassifierService {
         }
       } else {
         regime = MarketRegime.SIDEWAYS;
+      }
+
+      // 2026-01-24: WEAK 재분류 레이어 (README 스펙 반영)
+      // WEAK 트렌드가 실제로 횡보처럼 작동하면 SIDEWAYS로 재분류
+      if (REGIME_CONFIG.weakReclassify.enabled) {
+        if (regime === MarketRegime.WEAK_UPTREND || regime === MarketRegime.WEAK_DOWNTREND) {
+          const originalRegime = regime;
+          const lowAdx = adx < REGIME_CONFIG.weakReclassify.adxThreshold;
+          const lowAtr = atrPercent < REGIME_CONFIG.weakReclassify.atrPercentThreshold;
+
+          if (lowAdx || lowAtr) {
+            regime = MarketRegime.SIDEWAYS;
+            reclassifiedFromWeak = true;
+
+            const reasons: string[] = [];
+            if (lowAdx) reasons.push(`ADX=${adx.toFixed(1)}<${REGIME_CONFIG.weakReclassify.adxThreshold}`);
+            if (lowAtr) reasons.push(`ATR%=${(atrPercent * 100).toFixed(2)}<${REGIME_CONFIG.weakReclassify.atrPercentThreshold * 100}%`);
+
+            this.logger.log(
+              `🔄 WEAK recheck: ${originalRegime} → SIDEWAYS (${reasons.join(', ')})`,
+              'MarketRegimeClassifier',
+            );
+          }
+        }
       }
 
       // Check if regime changed
@@ -145,6 +189,9 @@ export class MarketRegimeClassifierService {
         metadata: {
           direction: trend.direction,
           atr,
+          adx, // 2026-01-24: ADX 추가
+          atrPercent: atrPercent * 100, // 2026-01-24: ATR% 추가
+          reclassifiedFromWeak, // 2026-01-24: WEAK 재분류 여부
         },
       });
 

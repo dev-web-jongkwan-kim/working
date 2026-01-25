@@ -19,6 +19,11 @@ export type BoxAgeStatus = 'FRESH' | 'OPTIMAL' | 'AGING' | 'EXPIRED';
 export type BoxSwingQuality = 'HIGH' | 'MEDIUM' | 'LOW';
 
 /**
+ * Volume Box Type (based on volume distribution)
+ */
+export type VolumeBoxType = 'CENTER_DOMINANT' | 'EDGE_DOMINANT' | 'UNSTRUCTURED';
+
+/**
  * Swing Point Type
  */
 export type SwingPointType = 'HIGH' | 'LOW';
@@ -83,6 +88,12 @@ export interface BoxRange {
 
   // Status
   isValid: boolean;
+
+  // 개선: 추가 메타데이터 (2026-01-24)
+  volumeBoxType?: VolumeBoxType;  // Volume distribution type
+  adxSizeMultiplier?: number;  // ADX-based size adjustment
+  adxRequireConfirm?: boolean;  // Need confirm candle due to high ADX
+  isExpandedBox?: boolean;  // Expanded box (4.5-6 ATR)
 }
 
 /**
@@ -124,6 +135,11 @@ export interface BoxEntrySignal {
   confidence: number;
   fundingRate?: number;
   breachPercent?: number;
+
+  // 2026-01-24 개선: 모드별 조정 정보
+  beTarget?: number; // BE 이동 목표 (R 배수) - LowVolMode: 0.4R, ExpandedBox: 0.45R, Normal: 0.5R
+  isLowVolMode?: boolean; // ATR% < 0.2% 저변동 모드
+  isExpandedBox?: boolean; // 4.5-6 ATR 확장 박스
 }
 
 /**

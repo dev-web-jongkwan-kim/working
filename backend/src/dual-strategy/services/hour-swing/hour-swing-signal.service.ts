@@ -14,9 +14,17 @@ import { Indicators } from '../../utils/indicators';
 /**
  * Hour Swing Signal Service
  * Integrates all Hour Swing sub-strategies
+ *
+ * 2026-01-24 개선:
+ * - SIDEWAYS 레짐: Hour Swing 완전 OFF
+ * - Loss-streak Kill Switch: 3연패 → 60분 쿨다운
  */
 @Injectable()
 export class HourSwingSignalService {
+  // Loss-streak tracking (전략 레벨 쿨다운)
+  private consecutiveLosses = 0;
+  private cooldownUntil = 0; // timestamp
+
   constructor(
     private readonly mtfAlignment: MtfAlignmentAnalyzerService,
     private readonly relativeStrength: RelativeStrengthRankerService,
@@ -24,6 +32,81 @@ export class HourSwingSignalService {
     private readonly cacheService: DataCacheService,
     private readonly logger: CustomLoggerService,
   ) {}
+
+  /**
+   * Record trade result for loss-streak tracking
+   * Called by executor after trade closes
+   */
+  recordTradeResult(isLoss: boolean): void {
+    const killSwitch = (HOUR_SWING_CONFIG as any).lossStreakKillSwitch;
+    if (!killSwitch?.enabled) return;
+
+    if (isLoss) {
+      this.consecutiveLosses++;
+      this.logger.warn(
+        `[HourSwing] 🔴 Loss recorded. Consecutive losses: ${this.consecutiveLosses}/${killSwitch.maxConsecutiveLosses}`,
+        'HourSwingSignalService',
+      );
+
+      if (this.consecutiveLosses >= killSwitch.maxConsecutiveLosses) {
+        this.cooldownUntil = Date.now() + killSwitch.cooldownMinutes * 60 * 1000;
+        this.logger.warn(
+          `[HourSwing] ⛔ KILL SWITCH ACTIVATED! ${this.consecutiveLosses} consecutive losses. ` +
+            `Cooldown until ${new Date(this.cooldownUntil).toISOString()} (${killSwitch.cooldownMinutes} min)`,
+          'HourSwingSignalService',
+        );
+      }
+    } else {
+      // Win resets streak
+      if (this.consecutiveLosses > 0) {
+        this.logger.log(
+          `[HourSwing] 🟢 Win recorded. Consecutive losses reset (was: ${this.consecutiveLosses})`,
+          'HourSwingSignalService',
+        );
+      }
+      this.consecutiveLosses = 0;
+    }
+  }
+
+  /**
+   * Check if strategy is in cooldown from kill switch
+   */
+  isInCooldown(): boolean {
+    const killSwitch = (HOUR_SWING_CONFIG as any).lossStreakKillSwitch;
+    if (!killSwitch?.enabled) return false;
+
+    const now = Date.now();
+    if (now < this.cooldownUntil) {
+      const remainingMin = Math.ceil((this.cooldownUntil - now) / 60000);
+      return true;
+    }
+
+    // Cooldown expired, reset
+    if (this.cooldownUntil > 0 && now >= this.cooldownUntil) {
+      this.logger.log(
+        `[HourSwing] ✅ Kill switch cooldown expired. Resetting consecutive losses.`,
+        'HourSwingSignalService',
+      );
+      this.consecutiveLosses = 0;
+      this.cooldownUntil = 0;
+    }
+
+    return false;
+  }
+
+  /**
+   * Get cooldown status for monitoring
+   */
+  getCooldownStatus(): { isActive: boolean; remainingMinutes: number; consecutiveLosses: number } {
+    const now = Date.now();
+    const isActive = now < this.cooldownUntil;
+    const remainingMinutes = isActive ? Math.ceil((this.cooldownUntil - now) / 60000) : 0;
+    return {
+      isActive,
+      remainingMinutes,
+      consecutiveLosses: this.consecutiveLosses,
+    };
+  }
 
   /**
    * Initialize funding rate history for all symbols
@@ -42,6 +125,26 @@ export class HourSwingSignalService {
         `[HourSwing] ${symbol} Starting analysis (regime=${regime})`,
         'HourSwingSignalService',
       );
+
+      // ========== 2026-01-24: SIDEWAYS 레짐 완전 OFF ==========
+      const regimeFilter = (HOUR_SWING_CONFIG as any).regimeFilter;
+      if (regimeFilter?.sidewaysOff && regime === MarketRegime.SIDEWAYS) {
+        this.logger.debug(
+          `[HourSwing] ${symbol} ⛔ SIDEWAYS regime - Hour Swing completely OFF`,
+          'HourSwingSignalService',
+        );
+        return null;
+      }
+
+      // ========== 2026-01-24: Loss-streak Kill Switch ==========
+      if (this.isInCooldown()) {
+        const status = this.getCooldownStatus();
+        this.logger.debug(
+          `[HourSwing] ${symbol} ⛔ Kill switch active - ${status.remainingMinutes} min remaining (${status.consecutiveLosses} consecutive losses)`,
+          'HourSwingSignalService',
+        );
+        return null;
+      }
 
       // Get current price and funding
       const currentPrice = await this.cacheService.getCurrentPrice(symbol);
@@ -126,7 +229,7 @@ export class HourSwingSignalService {
         const signal = await strategy.detect();
 
         if (signal.detected) {
-          // ========== NEW: Regime Filter ==========
+          // ========== IMPROVED: Regime Filter (WEAK 포함) ==========
           const regimeFilter = (HOUR_SWING_CONFIG as any).regimeFilter;
           if (regimeFilter?.enabled && regimeFilter?.blockCounterTrend) {
             // Block LONG during STRONG_DOWNTREND
@@ -145,6 +248,27 @@ export class HourSwingSignalService {
                 'HourSwingSignalService',
               );
               continue; // Try next sub-strategy
+            }
+
+            // NEW: Block counter-trend in WEAK regimes too
+            if (regimeFilter?.blockWeakCounterTrend) {
+              // Block LONG during WEAK_DOWNTREND
+              if (signal.direction === TradeDirection.LONG && regime === MarketRegime.WEAK_DOWNTREND) {
+                this.logger.warn(
+                  `[HourSwing] ${symbol} ❌ REGIME FILTER: LONG blocked during WEAK_DOWNTREND (${signal.subStrategy})`,
+                  'HourSwingSignalService',
+                );
+                continue;
+              }
+
+              // Block SHORT during WEAK_UPTREND
+              if (signal.direction === TradeDirection.SHORT && regime === MarketRegime.WEAK_UPTREND) {
+                this.logger.warn(
+                  `[HourSwing] ${symbol} ❌ REGIME FILTER: SHORT blocked during WEAK_UPTREND (${signal.subStrategy})`,
+                  'HourSwingSignalService',
+                );
+                continue;
+              }
             }
 
             this.logger.debug(

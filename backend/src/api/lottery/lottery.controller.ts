@@ -49,4 +49,17 @@ export class LotteryController {
     await this.lotteryExecutor.execute();
     return { message: 'Lottery execution triggered' };
   }
+
+  /**
+   * Sync PENDING orders with Binance
+   * Checks if orders still exist on Binance and updates DB
+   */
+  @Post('sync')
+  async syncWithBinance() {
+    const result = await this.lotteryService.syncWithBinance();
+    return {
+      message: 'Sync completed',
+      ...result,
+    };
+  }
 }

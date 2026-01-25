@@ -1,6 +1,14 @@
 /**
  * Box Range Strategy Configuration
  * Strategy C: Sideways market box trading
+ *
+ * [개선 이력 2026-01-24]
+ * - Volume Profile: 차단 → 등급 점수화 (edge-dominant 박스 허용)
+ * - ATR 저변동: 차단 → LowVolMode (사이즈 축소, TP 단축)
+ * - Box Height: 2-4.5 ATR → 1.5-6 ATR (확장 박스 조건부 허용)
+ * - ADX/DI: 차단 → 보수 운영 (사이즈 조정)
+ * - Same-box Loss Limiter 추가 (2 SL → 쿨다운)
+ * - TP 거리/스프레드 필터 추가
  */
 
 export const BOX_RANGE_CONFIG = {
@@ -38,40 +46,50 @@ export const BOX_RANGE_CONFIG = {
       mediumQualityMaxDeviation: 0.06, // MEDIUM quality threshold (0.05~0.06)
     },
 
-    // Symbol-specific Box Height (ATR-based)
+    // Symbol-specific Box Height (ATR-based) - 개선: 범위 확장 1.5-6 ATR
     symbolTypes: {
       stable: {
         // BTC, ETH
         symbols: ['BTCUSDT', 'ETHUSDT'],
         minAtr: 1.5,
-        maxAtr: 2.0,
+        maxAtr: 3.0, // 개선: 2.0 → 3.0
         optimalMinAtr: 1.5,
-        optimalMaxAtr: 1.8,
+        optimalMaxAtr: 2.5, // 개선: 1.8 → 2.5
       },
       altcoin: {
         // SOL, XRP, ADA, etc.
         symbols: [], // Auto-detect by volume rank
-        minAtr: 2.0,
-        maxAtr: 4.5,
+        minAtr: 1.5, // 개선: 2.0 → 1.5
+        maxAtr: 6.0, // 개선: 4.5 → 6.0 (확장 박스 허용)
         optimalMinAtr: 2.0,
-        optimalMaxAtr: 4.0,
+        optimalMaxAtr: 4.5, // 개선: 4.0 → 4.5
       },
       highVolatility: {
         // MEME coins, new listings
         symbols: [], // Auto-detect by ATR %
-        minAtr: 4.0,
-        maxAtr: 5.0,
-        optimalMinAtr: 4.0,
+        minAtr: 2.0, // 개선: 4.0 → 2.0
+        maxAtr: 6.0, // 개선: 5.0 → 6.0
+        optimalMinAtr: 3.0, // 개선: 4.0 → 3.0
         optimalMaxAtr: 5.0,
       },
     },
 
-    // Box Height Conditions (default fallback)
+    // Box Height Conditions (default fallback) - 개선: 범위 확장
     height: {
-      minAtr: 2.0, // Min box height (ATR × 2.0)
-      maxAtr: 4.5, // Max box height (ATR × 4.5)
-      optimalMinAtr: 2.0, // Optimal range start
-      optimalMaxAtr: 4.0, // Optimal range end
+      minAtr: 1.5, // 개선: 2.0 → 1.5
+      maxAtr: 6.0, // 개선: 4.5 → 6.0
+      optimalMinAtr: 2.0,
+      optimalMaxAtr: 4.5, // 개선: 4.0 → 4.5
+    },
+
+    // 확장 박스 조건부 운영 규칙 (4.5-6.0 ATR)
+    expandedBox: {
+      minAtr: 4.5,
+      maxAtr: 6.0,
+      sizeMultiplier: 0.6, // 사이즈 60%
+      entryZonePercent: 0.15, // 진입존 15%로 축소
+      tpRatio: 0.7, // TP 70%로 단축
+      requireConfirmCandle: true,
     },
 
     // Time Conditions
@@ -82,19 +100,36 @@ export const BOX_RANGE_CONFIG = {
       expireCandles: 96, // Expiration (24 hours, invalidate box)
     },
 
-    // ADX Conditions (confirm no trend)
+    // ADX Conditions - 개선: 차단 → 보수 운영
     adx: {
       maxValue: 28, // 최적화: 20 → 28 (완벽한 횡보가 아니더라도 박스권이면 진입)
       maxDiDiff: 10, // |+DI - -DI| < 10
       requireDeclining: false, // 최적화: true → false (절대값만 체크, 횡보장 진입 기회 확대)
       slopeLookback: 3, // Check slope over 3 candles
+      // 개선: 소프트 블로킹 (차단 대신 사이즈 조정)
+      softBlocking: {
+        enabled: true,
+        hardBlockAbove: 40, // ADX > 40일 때만 완전 차단
+        reduceSizeAbove: 28, // ADX > 28이면 사이즈 축소
+        sizeMultiplierAt30: 0.7, // ADX=30일 때 70%
+        sizeMultiplierAt35: 0.5, // ADX=35일 때 50%
+        requireConfirmAbove: 25, // ADX > 25이면 확인봉 필수
+      },
     },
 
-    // Volume Profile Conditions
+    // Volume Profile Conditions - 개선: 차단 제거, 등급 점수화만
     volume: {
-      centerRatio: 0.775, // 최적화: 0.8 → 0.85 → 0.775 (77.5%, 횡보장 기회 대폭 확대)
-      edgeRatio: 1.2, // Edge volume > avg × 1.2
+      centerRatio: 0.775, // 참고용 (차단에 사용하지 않음)
+      edgeRatio: 1.2, // 참고용 (차단에 사용하지 않음)
       lookbackCandles: 50, // Volume analysis candle count
+      // 개선: 차단 대신 등급 점수화
+      useAsBlocking: false, // false = 차단하지 않고 점수화만
+      // 박스 타입 분류
+      boxTypes: {
+        centerDominant: { centerRatio: 0.6 }, // center > 60% = 중앙 집중형
+        edgeDominant: { edgeRatio: 1.3 }, // edge > center × 1.3 = 경계 집중형
+        unstructured: { threshold: 0.4 }, // 분산형 (낮은 점수)
+      },
     },
   },
 
@@ -116,7 +151,7 @@ export const BOX_RANGE_CONFIG = {
   // Entry Conditions
   // ═══════════════════════════════════════════════════════════
   entry: {
-    entryZonePercent: 0.20, // 최적화: 0.15 → 0.20 (진입 기회 확대, 상단/하단 20%)
+    entryZonePercent: 0.25, // 완화: 0.20 → 0.25 (진입 기회 추가 확대)
 
     // SFP (Sweep/Fake Breakout) Filter
     sfpFilter: {
@@ -137,7 +172,7 @@ export const BOX_RANGE_CONFIG = {
     // Volume Decay Filter (support/resistance working)
     volumeDecayFilter: {
       enabled: true,
-      maxVolumeRatio: 0.70, // Current volume < 70% of average
+      maxVolumeRatio: 2.3, // 완화: 0.85 → 2.3 (볼륨 130% 증가까지 허용)
       lookbackCandles: 20, // Average over 20 candles
     },
 
@@ -159,7 +194,7 @@ export const BOX_RANGE_CONFIG = {
     common: {
       momentumDecay: true, // Confirm momentum decay
       momentumLookback: 3, // Compare recent 3 candles
-      maxConsecutiveBars: 2, // Limit consecutive same-direction bars
+      maxConsecutiveBars: 3, // 완화: 2 → 3 (진입 기회 확대)
     },
   },
 
@@ -323,5 +358,47 @@ export const BOX_RANGE_CONFIG = {
     maxAtrPercent: 0.035, // 3.5% (완화: 2.5% → 3.5%)
     maxSpreadPercent: 0.0007, // 0.07%
     minVolumeRank: 0.3, // Top 70% by volume
+  },
+
+  // ═══════════════════════════════════════════════════════════
+  // Low Volatility Mode (저변동 시장 보수 운영) - 신규
+  // ═══════════════════════════════════════════════════════════
+  lowVolMode: {
+    enabled: true,
+    triggerAtrPercent: 0.002, // ATR% < 0.2%면 LowVolMode 적용
+    adjustments: {
+      sizeMultiplier: 0.6, // 사이즈 60%
+      tp1Ratio: 0.6, // TP1 0.6R (기존보다 짧게)
+      beActivateRatio: 0.4, // BE 0.4R에서 활성화 (조기)
+      requireConfirmCandle: true, // 확인봉 필수
+    },
+  },
+
+  // ═══════════════════════════════════════════════════════════
+  // Fee/Slippage Viability Filter (수수료 대비 수익성) - 신규
+  // ═══════════════════════════════════════════════════════════
+  viabilityFilter: {
+    enabled: true,
+    // (A) TP 거리 최소값 필터
+    minTpDistancePercent: {
+      major: 0.0018, // 메이저: 0.18% 이상
+      altcoin: 0.0025, // 알트: 0.25% 이상
+    },
+    // (C) 스프레드 필터 (슬리피지 대용)
+    maxSpreadPercent: {
+      major: 0.0003, // 메이저: 0.03%
+      altcoin: 0.0006, // 알트: 0.06%
+    },
+    majorSymbols: ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT'],
+  },
+
+  // ═══════════════════════════════════════════════════════════
+  // Same-Box Loss Limiter (동일 박스 반복 손절 방지) - 신규
+  // ═══════════════════════════════════════════════════════════
+  sameBoxLossLimiter: {
+    enabled: true,
+    maxConsecutiveLosses: 2, // 같은 박스에서 2회 SL 발생 시
+    cooldownMinutes: 120, // 해당 박스 2시간 쿨다운
+    invalidateBox: true, // 박스 자체를 무효화 (새 박스 형성까지 대기)
   },
 };

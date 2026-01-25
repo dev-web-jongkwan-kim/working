@@ -1514,8 +1514,9 @@ export class OrderExecutorService {
   }
 
   /**
-   * Calculate PnL for a position
+   * Calculate PnL for a position (수수료 포함)
    * CRITICAL: Used for emergency close and position reconciliation
+   * 바이낸스 선물 수수료: 테이커 0.04% (진입 + 청산 = 0.08%)
    */
   private calculatePnL(
     direction: string,
@@ -1528,8 +1529,14 @@ export class OrderExecutorService {
       ? exitPrice - entryPrice
       : entryPrice - exitPrice;
 
-    const pnlUsd = (priceDiff / entryPrice) * quantity * exitPrice;
-    return pnlUsd;
+    const notional = quantity * exitPrice;
+    const pnlUsd = (priceDiff / entryPrice) * notional;
+
+    // 수수료 차감 (진입 0.04% + 청산 0.04% = 0.08%)
+    const commissionRate = 0.0008; // 0.08%
+    const commission = notional * commissionRate;
+
+    return pnlUsd - commission;
   }
 
   /**

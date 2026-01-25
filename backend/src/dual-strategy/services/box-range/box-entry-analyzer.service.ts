@@ -6,6 +6,16 @@ import { Indicators } from '../../utils/indicators';
 import { CustomLoggerService } from '../../../common/logging/custom-logger.service';
 
 /**
+ * Entry Analysis Options (2026-01-24 개선)
+ * - LowVolMode: 저변동 구간에서 보수적 운영
+ * - ExpandedBox: 4.5-6 ATR 확장 박스 조건부 운영
+ */
+export interface EntryAnalysisOptions {
+  isLowVolMode?: boolean; // ATR% < 0.2% 저변동 모드
+  isExpandedBox?: boolean; // 4.5-6 ATR 확장 박스
+}
+
+/**
  * Box Entry Analyzer Service
  * Analyzes entry conditions for box range trades
  */
@@ -18,26 +28,39 @@ export class BoxEntryAnalyzerService {
 
   /**
    * Analyze entry conditions for a detected box
+   * @param options - LowVolMode/ExpandedBox flags for conditional adjustments
    */
   async analyzeEntry(
     box: BoxRange,
     candles: Candle[],
     currentPrice: number,
     fundingRate: number,
+    options: EntryAnalysisOptions = {},
   ): Promise<BoxEntrySignal | null> {
     const { symbol } = box;
+    const { isLowVolMode = false, isExpandedBox = false } = options;
+
+    // 모드별 로깅
+    const modeFlags: string[] = [];
+    if (isLowVolMode) modeFlags.push('LowVolMode');
+    if (isExpandedBox) modeFlags.push('ExpandedBox');
+    const modeStr = modeFlags.length > 0 ? ` [${modeFlags.join('+')}]` : '';
 
     this.logger.debug(
-      `[BoxEntry] ${symbol} Analyzing entry for box (upper=${box.upper.toFixed(2)}, ` +
+      `[BoxEntry] ${symbol}${modeStr} Analyzing entry for box (upper=${box.upper.toFixed(2)}, ` +
         `lower=${box.lower.toFixed(2)}, grade=${box.grade})`,
       'BoxEntryAnalyzer',
     );
 
     // 1. Check if price is in entry zone
-    const entryZone = this.checkEntryZone(box, currentPrice);
+    // ExpandedBox는 15% 진입존 (기본 20%)
+    const entryZonePercent = isExpandedBox
+      ? BOX_RANGE_CONFIG.boxDefinition.expandedBox.entryZonePercent
+      : this.config.entryZonePercent;
+    const entryZone = this.checkEntryZone(box, currentPrice, entryZonePercent);
 
     this.logger.debug(
-      `[BoxEntry] ${symbol} Entry zone: longZone=${entryZone.isInLongZone}, ` +
+      `[BoxEntry] ${symbol}${modeStr} Entry zone (${(entryZonePercent * 100).toFixed(0)}%): longZone=${entryZone.isInLongZone}, ` +
         `shortZone=${entryZone.isInShortZone}, distFromLower=${entryZone.distanceFromLowerPercent.toFixed(2)}%, ` +
         `distFromUpper=${entryZone.distanceFromUpperPercent.toFixed(2)}%`,
       'BoxEntryAnalyzer',
@@ -241,18 +264,21 @@ export class BoxEntryAnalyzerService {
     const marginUsd = BOX_RANGE_CONFIG.position.marginUsd * (sizePercent / 100);
 
     // 10. Calculate SL/TP prices (with POC-based TP1)
-    const { slPrice, tp1Price, tp2Price, tp3Price } = this.calculateSlTp(
+    // LowVolMode/ExpandedBox: TP 축소 적용
+    const { slPrice, tp1Price, tp2Price, tp3Price, beTarget } = this.calculateSlTp(
       box,
       currentPrice,
       direction,
       candles,
       symbol,
+      { isLowVolMode, isExpandedBox },
     );
 
+    const modeInfo = isLowVolMode ? '[LowVol]' : isExpandedBox ? '[Expanded]' : '';
     this.logger.log(
-      `[BoxEntry] ${symbol} 🎯 Signal generated! Direction=${direction}, grade=${box.grade}, ` +
+      `[BoxEntry] ${symbol} 🎯 Signal generated!${modeInfo} Direction=${direction}, grade=${box.grade}, ` +
         `entry=${currentPrice.toFixed(2)}, SL=${slPrice.toFixed(2)}, ` +
-        `TP1=${tp1Price.toFixed(2)}, TP2=${tp2Price.toFixed(2)}, ` +
+        `TP1=${tp1Price.toFixed(2)}, TP2=${tp2Price.toFixed(2)}, BE=${beTarget}R, ` +
         `leverage=${leverage}x, margin=$${marginUsd.toFixed(2)}`,
       'BoxEntryAnalyzer',
     );
@@ -274,14 +300,23 @@ export class BoxEntryAnalyzerService {
       marginUsd,
       confidence: box.confidence,
       fundingRate,
+      // 2026-01-24 개선: 모드별 조정 정보
+      beTarget,
+      isLowVolMode,
+      isExpandedBox,
     };
   }
 
   /**
    * Check if price is in entry zone
+   * @param entryZonePercent - 진입존 비율 (기본 20%, ExpandedBox 15%)
    */
-  private checkEntryZone(box: BoxRange, currentPrice: number): BoxEntryZone {
-    const entryZoneHeight = box.height * this.config.entryZonePercent;
+  private checkEntryZone(
+    box: BoxRange,
+    currentPrice: number,
+    entryZonePercent: number = this.config.entryZonePercent,
+  ): BoxEntryZone {
+    const entryZoneHeight = box.height * entryZonePercent;
     const longZoneUpper = box.lower + entryZoneHeight;
     const shortZoneLower = box.upper - entryZoneHeight;
 
@@ -464,6 +499,12 @@ export class BoxEntryAnalyzerService {
 
   /**
    * Calculate SL/TP prices (2-stage system with POC-based TP1)
+   * @param options - LowVolMode/ExpandedBox flags for TP adjustment
+   *
+   * 2026-01-24 개선:
+   * - LowVolMode: TP 0.6R, BE 0.4R (보수적)
+   * - ExpandedBox: TP 0.7R (중간)
+   * - Normal: TP 0.5R (기존)
    */
   private calculateSlTp(
     box: BoxRange,
@@ -471,17 +512,44 @@ export class BoxEntryAnalyzerService {
     direction: 'LONG' | 'SHORT',
     candles: Candle[],
     symbol: string,
+    options: EntryAnalysisOptions = {},
   ): {
     slPrice: number;
     tp1Price: number;
     tp2Price: number;
     tp3Price: number;
+    beTarget: number; // BE 이동 목표 (R 배수)
   } {
+    const { isLowVolMode = false, isExpandedBox = false } = options;
     const slBuffer = box.atr * this.slTpConfig.slBufferAtr;
 
     let slPrice: number;
     let tp1Price: number;
     let tp2Price: number;
+
+    // TP1 비율 결정 (LowVolMode > ExpandedBox > Normal)
+    // LowVolMode: 0.6R, ExpandedBox: 0.7R, Normal: 기존 fallbackPercent (0.5)
+    let tp1Ratio = this.slTpConfig.tp1.fallbackPercent;
+    let tp2Ratio = this.slTpConfig.tp2.targetPercent;
+    let beTarget = 0.5; // 기본 BE 이동 목표
+
+    if (isLowVolMode) {
+      tp1Ratio = BOX_RANGE_CONFIG.lowVolMode.adjustments.tp1Ratio; // 0.6R
+      tp2Ratio = 0.7; // 축소된 TP2
+      beTarget = BOX_RANGE_CONFIG.lowVolMode.adjustments.beActivateRatio; // 0.4R
+      this.logger.debug(
+        `[BoxEntry] ${symbol} LowVolMode: TP1=${tp1Ratio}R, TP2=${tp2Ratio}R, BE=${beTarget}R`,
+        'BoxEntryAnalyzer',
+      );
+    } else if (isExpandedBox) {
+      tp1Ratio = BOX_RANGE_CONFIG.boxDefinition.expandedBox.tpRatio; // 0.7R
+      tp2Ratio = 0.85; // 약간 축소된 TP2
+      beTarget = 0.45; // 약간 빠른 BE
+      this.logger.debug(
+        `[BoxEntry] ${symbol} ExpandedBox: TP1=${tp1Ratio}R, TP2=${tp2Ratio}R, BE=${beTarget}R`,
+        'BoxEntryAnalyzer',
+      );
+    }
 
     // Calculate POC (Point of Control) from volume profile
     let pocPrice = null;
@@ -493,56 +561,58 @@ export class BoxEntryAnalyzerService {
       // SL below box lower
       slPrice = box.lower - slBuffer;
 
-      // TP1: Use POC if available and valid, otherwise use fallback
-      if (pocPrice && pocPrice > entryPrice && pocPrice < box.upper) {
+      // TP1: Use POC if available and valid, otherwise use mode-based ratio
+      if (pocPrice && pocPrice > entryPrice && pocPrice < box.upper && !isLowVolMode && !isExpandedBox) {
+        // POC는 normal 모드에서만 사용 (LowVolMode/ExpandedBox에서는 고정 비율 사용)
         tp1Price = pocPrice;
         this.logger.debug(
           `[BoxEntry] ${symbol} TP1 using POC: ${pocPrice.toFixed(2)}`,
           'BoxEntryAnalyzer',
         );
       } else {
-        tp1Price = entryPrice + box.height * this.slTpConfig.tp1.fallbackPercent;
+        tp1Price = entryPrice + box.height * tp1Ratio;
         this.logger.debug(
-          `[BoxEntry] ${symbol} TP1 using fallback (${this.slTpConfig.tp1.fallbackPercent * 100}%)`,
+          `[BoxEntry] ${symbol} TP1 using ratio (${tp1Ratio * 100}%): ${tp1Price.toFixed(2)}`,
           'BoxEntryAnalyzer',
         );
       }
 
-      // TP2: 90% of box height
-      tp2Price = entryPrice + box.height * this.slTpConfig.tp2.targetPercent;
+      // TP2: mode-based ratio
+      tp2Price = entryPrice + box.height * tp2Ratio;
     } else {
       // SHORT
       // SL above box upper
       slPrice = box.upper + slBuffer;
 
-      // TP1: Use POC if available and valid, otherwise use fallback
-      if (pocPrice && pocPrice < entryPrice && pocPrice > box.lower) {
+      // TP1: Use POC if available and valid, otherwise use mode-based ratio
+      if (pocPrice && pocPrice < entryPrice && pocPrice > box.lower && !isLowVolMode && !isExpandedBox) {
         tp1Price = pocPrice;
         this.logger.debug(
           `[BoxEntry] ${symbol} TP1 using POC: ${pocPrice.toFixed(2)}`,
           'BoxEntryAnalyzer',
         );
       } else {
-        tp1Price = entryPrice - box.height * this.slTpConfig.tp1.fallbackPercent;
+        tp1Price = entryPrice - box.height * tp1Ratio;
         this.logger.debug(
-          `[BoxEntry] ${symbol} TP1 using fallback (${this.slTpConfig.tp1.fallbackPercent * 100}%)`,
+          `[BoxEntry] ${symbol} TP1 using ratio (${tp1Ratio * 100}%): ${tp1Price.toFixed(2)}`,
           'BoxEntryAnalyzer',
         );
       }
 
-      // TP2: 90% of box height
-      tp2Price = entryPrice - box.height * this.slTpConfig.tp2.targetPercent;
+      // TP2: mode-based ratio
+      tp2Price = entryPrice - box.height * tp2Ratio;
     }
 
+    const modeStr = isLowVolMode ? '[LowVol]' : isExpandedBox ? '[Expanded]' : '[Normal]';
     this.logger.debug(
-      `[BoxEntry] ${symbol} SL/TP calculation (2-stage): direction=${direction}, ` +
+      `[BoxEntry] ${symbol} ${modeStr} SL/TP calculation: direction=${direction}, ` +
         `boxHeight=${box.height.toFixed(2)}, slBuffer=${slBuffer.toFixed(2)}, ` +
-        `TP1=${tp1Price.toFixed(2)} (70% close), ` +
-        `TP2=${tp2Price.toFixed(2)} (30% close with 0.5 ATR trailing)`,
+        `TP1=${tp1Price.toFixed(2)} (${tp1Ratio}R), ` +
+        `TP2=${tp2Price.toFixed(2)} (${tp2Ratio}R), BE target=${beTarget}R`,
       'BoxEntryAnalyzer',
     );
 
-    return { slPrice, tp1Price, tp2Price, tp3Price: null };
+    return { slPrice, tp1Price, tp2Price, tp3Price: null, beTarget };
   }
 
   /**

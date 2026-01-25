@@ -13,11 +13,18 @@ import { ActiveBoxCache } from '../../interfaces/box.interface';
  * Box Range Signal Service
  * Main integration service for box range strategy
  * Manages active boxes cache and signal generation
+ *
+ * [개선 2026-01-24]
+ * - ATR 저변동: 차단 → LowVolMode
+ * - Same-box Loss Limiter 추가
+ * - Viability Filter (TP거리/스프레드) 추가
  */
 @Injectable()
 export class BoxRangeSignalService {
   private activeBoxes: Map<string, ActiveBoxCache> = new Map();
   private disabledSymbols: Map<string, number> = new Map(); // symbol -> disabledUntil timestamp
+  // 개선: 같은 박스 손절 횟수 추적
+  private boxLossCount: Map<string, { count: number; lastLossTime: number }> = new Map();
 
   constructor(
     private readonly boxDetector: BoxDetectorService,
@@ -48,10 +55,12 @@ export class BoxRangeSignalService {
       return { detected: false } as any;
     }
 
-    // 2. Check common filters
-    if (!this.passesCommonFilters(candles, symbol)) {
+    // 2. Check common filters (개선: LowVolMode 플래그 확인)
+    const filterResult = this.passesCommonFilters(candles, symbol);
+    if (!filterResult.passed) {
       return { detected: false } as any;
     }
+    const isLowVolMode = filterResult.isLowVol || false;
 
     // 3. Check if we have an active box for this symbol
     let box = this.getActiveBox(symbol);
@@ -110,8 +119,14 @@ export class BoxRangeSignalService {
       }
     }
 
-    // 6. Analyze entry conditions
-    const entrySignal = await this.entryAnalyzer.analyzeEntry(box, candles, currentPrice, fundingRate);
+    // 6. Analyze entry conditions (개선: LowVolMode, 확장박스 플래그 전달)
+    const entrySignal = await this.entryAnalyzer.analyzeEntry(
+      box,
+      candles,
+      currentPrice,
+      fundingRate,
+      { isLowVolMode, isExpandedBox: box.isExpandedBox },
+    );
 
     if (!entrySignal) {
       this.logger.debug(
@@ -121,25 +136,48 @@ export class BoxRangeSignalService {
       return { detected: false } as any;
     }
 
-    // 7. Adjust position size based on swing quality
-    let adjustedMarginUsd = entrySignal.marginUsd;
-    let sizeAdjustmentReason = '';
-
-    if (box.swingQuality === 'MEDIUM') {
-      adjustedMarginUsd = entrySignal.marginUsd * 0.75; // 75% size for MEDIUM quality
-      sizeAdjustmentReason = 'MEDIUM quality: 75% position size';
-      this.logger.log(
-        `[BoxRangeSignal] ${symbol} ⚠️ MEDIUM quality box detected - reducing position size to 75% ` +
-          `(${entrySignal.marginUsd} → ${adjustedMarginUsd})`,
-        'BoxRangeSignal',
-      );
-    } else if (box.swingQuality === 'HIGH') {
-      sizeAdjustmentReason = 'HIGH quality: 100% position size';
-      this.logger.log(
-        `[BoxRangeSignal] ${symbol} ⭐⭐ HIGH quality box detected - full position size`,
-        'BoxRangeSignal',
-      );
+    // 6.5 개선: Viability Filter 체크
+    if (!this.passesViabilityFilter(symbol, box, entrySignal.entryPrice, entrySignal.direction)) {
+      return { detected: false } as any;
     }
+
+    // 7. Adjust position size based on multiple factors (개선)
+    let adjustedMarginUsd = entrySignal.marginUsd;
+    let sizeAdjustmentReasons: string[] = [];
+
+    // 7a. Swing Quality 조정
+    if (box.swingQuality === 'MEDIUM') {
+      adjustedMarginUsd *= 0.75;
+      sizeAdjustmentReasons.push('MEDIUM quality: 75%');
+    } else if (box.swingQuality === 'HIGH') {
+      sizeAdjustmentReasons.push('HIGH quality: 100%');
+    }
+
+    // 7b. 개선: ADX 기반 사이즈 조정
+    if (box.adxSizeMultiplier && box.adxSizeMultiplier < 1.0) {
+      adjustedMarginUsd *= box.adxSizeMultiplier;
+      sizeAdjustmentReasons.push(`ADX elevated: ${Math.round(box.adxSizeMultiplier * 100)}%`);
+    }
+
+    // 7c. 개선: LowVolMode 사이즈 조정
+    const lowVolConfig = (BOX_RANGE_CONFIG as any).lowVolMode;
+    if (isLowVolMode && lowVolConfig?.adjustments?.sizeMultiplier) {
+      adjustedMarginUsd *= lowVolConfig.adjustments.sizeMultiplier;
+      sizeAdjustmentReasons.push(`LowVol: ${Math.round(lowVolConfig.adjustments.sizeMultiplier * 100)}%`);
+    }
+
+    // 7d. 개선: 확장 박스 사이즈 조정
+    const expandedBoxConfig = (BOX_RANGE_CONFIG as any).boxDefinition?.expandedBox;
+    if (box.isExpandedBox && expandedBoxConfig?.sizeMultiplier) {
+      adjustedMarginUsd *= expandedBoxConfig.sizeMultiplier;
+      sizeAdjustmentReasons.push(`Expanded box: ${Math.round(expandedBoxConfig.sizeMultiplier * 100)}%`);
+    }
+
+    const sizeAdjustmentReason = sizeAdjustmentReasons.join(' + ');
+    this.logger.log(
+      `[BoxRangeSignal] ${symbol} Size adjustment: ${entrySignal.marginUsd.toFixed(1)} → ${adjustedMarginUsd.toFixed(1)} (${sizeAdjustmentReason})`,
+      'BoxRangeSignal',
+    );
 
     // 8. Convert to TradingSignal format
     const tradingSignal: TradingSignal = {
@@ -176,6 +214,11 @@ export class BoxRangeSignalService {
         sizeAdjustmentReason,
         tp3Price: entrySignal.tp3Price, // Store TP3 in metadata
         touchCount: box.swingHighs.length + box.swingLows.length,
+        // 개선: 추가 메타데이터
+        volumeBoxType: box.volumeBoxType,
+        isLowVolMode,
+        isExpandedBox: box.isExpandedBox,
+        adxSizeMultiplier: box.adxSizeMultiplier,
       },
     };
 
@@ -442,25 +485,15 @@ export class BoxRangeSignalService {
 
   /**
    * Check common filters (ATR, spread, volume)
+   * 개선: ATR 저변동은 차단하지 않고 LowVolMode 플래그만 설정
    */
-  private passesCommonFilters(candles: Candle[], symbol: string): boolean {
+  private passesCommonFilters(candles: Candle[], symbol: string): { passed: boolean; isLowVol?: boolean; atrPercent?: number } {
     const { filters } = BOX_RANGE_CONFIG;
+    const lowVolConfig = (BOX_RANGE_CONFIG as any).lowVolMode;
 
     // DEBUG: Log candle info
     this.logger.debug(
       `[BoxRangeSignal] ${symbol} Checking filters with ${candles.length} candles`,
-      'BoxRangeSignal',
-    );
-
-    // DEBUG: Log first and last candle
-    const firstCandle = candles[0];
-    const lastCandle = candles[candles.length - 1];
-    this.logger.debug(
-      `[BoxRangeSignal] ${symbol} First candle: H=${firstCandle?.high} L=${firstCandle?.low} O=${firstCandle?.open} C=${firstCandle?.close}`,
-      'BoxRangeSignal',
-    );
-    this.logger.debug(
-      `[BoxRangeSignal] ${symbol} Last candle: H=${lastCandle?.high} L=${lastCandle?.low} O=${lastCandle?.open} C=${lastCandle?.close}`,
       'BoxRangeSignal',
     );
 
@@ -469,23 +502,91 @@ export class BoxRangeSignalService {
     const currentPrice = candles[candles.length - 1].close;
     const atrPercent = atr / currentPrice;
 
-    // DEBUG: Log ATR calculation details
     this.logger.debug(
       `[BoxRangeSignal] ${symbol} ATR=${atr.toFixed(8)}, Price=${currentPrice.toFixed(4)}, ATR%=${(atrPercent * 100).toFixed(2)}%`,
       'BoxRangeSignal',
     );
 
-    if (atrPercent < filters.minAtrPercent || atrPercent > filters.maxAtrPercent) {
+    // 개선: 고변동(상한 초과)만 차단, 저변동은 LowVolMode
+    if (atrPercent > filters.maxAtrPercent) {
       this.logger.debug(
-        `[BoxRangeSignal] ${symbol} Failed ATR filter: ${(atrPercent * 100).toFixed(2)}% ` +
-          `(range: ${filters.minAtrPercent * 100}-${filters.maxAtrPercent * 100}%)`,
+        `[BoxRangeSignal] ${symbol} ❌ ATR too high: ${(atrPercent * 100).toFixed(2)}% > ${filters.maxAtrPercent * 100}%`,
         'BoxRangeSignal',
       );
-      return false;
+      return { passed: false };
     }
 
-    // Additional filters could be added here (spread, volume rank)
-    // For now, keeping it simple
+    // 개선: 저변동은 LowVolMode로 허용
+    const isLowVol = lowVolConfig?.enabled && atrPercent < (lowVolConfig?.triggerAtrPercent || filters.minAtrPercent);
+    if (isLowVol) {
+      this.logger.log(
+        `[BoxRangeSignal] ${symbol} ⚠️ LowVolMode activated: ATR%=${(atrPercent * 100).toFixed(2)}% < ${((lowVolConfig?.triggerAtrPercent || filters.minAtrPercent) * 100).toFixed(2)}%`,
+        'BoxRangeSignal',
+      );
+    }
+
+    return { passed: true, isLowVol, atrPercent };
+  }
+
+  /**
+   * 개선: Box 손절 기록 (Same-box Loss Limiter용)
+   */
+  recordBoxLoss(symbol: string, boxId: string): void {
+    const key = `${symbol}_${boxId}`;
+    const existing = this.boxLossCount.get(key);
+    const lossLimiter = (BOX_RANGE_CONFIG as any).sameBoxLossLimiter;
+
+    if (existing) {
+      existing.count++;
+      existing.lastLossTime = Date.now();
+    } else {
+      this.boxLossCount.set(key, { count: 1, lastLossTime: Date.now() });
+    }
+
+    const current = this.boxLossCount.get(key)!;
+    this.logger.log(
+      `[BoxRangeSignal] ${symbol} Box loss recorded: count=${current.count}`,
+      'BoxRangeSignal',
+    );
+
+    // 2회 손절 시 박스 비활성화
+    if (lossLimiter?.enabled && current.count >= (lossLimiter?.maxConsecutiveLosses || 2)) {
+      this.logger.warn(
+        `[BoxRangeSignal] ${symbol} ❌ Same-box loss limit reached (${current.count}), invalidating box`,
+        'BoxRangeSignal',
+      );
+      if (lossLimiter?.invalidateBox) {
+        this.removeActiveBox(symbol);
+      }
+      this.disableSymbol(symbol, lossLimiter?.cooldownMinutes || 120, 'Same-box loss limit');
+    }
+  }
+
+  /**
+   * 개선: Viability Filter (TP 거리/스프레드)
+   */
+  private passesViabilityFilter(symbol: string, box: any, entryPrice: number, direction: string): boolean {
+    const viabilityConfig = (BOX_RANGE_CONFIG as any).viabilityFilter;
+    if (!viabilityConfig?.enabled) return true;
+
+    const isMajor = viabilityConfig.majorSymbols?.includes(symbol) || false;
+
+    // (A) TP 거리 최소값 필터
+    const minTpDistanceConfig = viabilityConfig.minTpDistancePercent;
+    const minTpDistance = isMajor ? minTpDistanceConfig?.major : minTpDistanceConfig?.altcoin;
+    if (minTpDistance) {
+      const tpDistance = direction === 'LONG'
+        ? (box.upper - entryPrice) / entryPrice
+        : (entryPrice - box.lower) / entryPrice;
+
+      if (tpDistance < minTpDistance) {
+        this.logger.debug(
+          `[BoxRangeSignal] ${symbol} ❌ Viability: TP distance too small: ${(tpDistance * 100).toFixed(3)}% < ${(minTpDistance * 100).toFixed(3)}%`,
+          'BoxRangeSignal',
+        );
+        return false;
+      }
+    }
 
     return true;
   }
