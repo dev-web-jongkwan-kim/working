@@ -46,6 +46,10 @@ export class SignalQueueService {
   /**
    * Add signal to queue (with deduplication)
    * Returns true if added, false if duplicate
+   *
+   * FIXED: Use SETNX (SET if Not eXists) for atomic operation
+   * to prevent race condition where two signals could both pass
+   * the duplicate check simultaneously
    */
   async addToQueue(
     signal: TradingSignal,
@@ -53,16 +57,6 @@ export class SignalQueueService {
     regime: MarketRegime,
   ): Promise<boolean> {
     const key = this.QUEUE_KEY_PREFIX + symbol;
-
-    // Check if already in queue
-    const existing = await this.cacheService.client.get(key);
-    if (existing) {
-      this.logger.debug(
-        `[SignalQueue] ${symbol} already in queue, skipping duplicate`,
-        'SignalQueueService',
-      );
-      return false;
-    }
 
     // Calculate priority based on regime alignment
     const priority = this.calculatePriority(signal.direction, regime);
@@ -76,10 +70,25 @@ export class SignalQueueService {
       priority,
     };
 
-    // Add to Redis with TTL
-    await this.cacheService.client.set(key, JSON.stringify(queuedSignal), {
-      EX: this.SIGNAL_TTL_SECONDS,
-    });
+    // ATOMIC: Use NX (SET if Not eXists) to prevent race condition
+    // This ensures only ONE signal per symbol can be added
+    const result = await this.cacheService.client.set(
+      key,
+      JSON.stringify(queuedSignal),
+      {
+        EX: this.SIGNAL_TTL_SECONDS,
+        NX: true, // Only set if key does NOT exist (atomic check-and-set)
+      },
+    );
+
+    // result is null if key already existed (duplicate)
+    if (!result) {
+      this.logger.debug(
+        `[SignalQueue] ${symbol} already in queue, skipping duplicate (atomic check)`,
+        'SignalQueueService',
+      );
+      return false;
+    }
 
     // Add to index set for tracking
     await this.cacheService.client.sAdd(this.QUEUE_INDEX_KEY, symbol);

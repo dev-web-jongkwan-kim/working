@@ -29,6 +29,10 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
   private symbols: string[] = [];
   private processingSymbols: Set<string> = new Set(); // Prevent duplicate signals
 
+  // Redis key prefix for execution locks (prevents race condition between DB check and order execution)
+  private readonly EXECUTION_LOCK_PREFIX = 'execution_lock:';
+  private readonly EXECUTION_LOCK_TTL_SECONDS = 60; // 60 seconds TTL to prevent deadlocks
+
   // Hour Swing concurrent entry tracking (5분 내 동시 진입 제한)
   private hourSwingEntryTimestamps: number[] = [];
 
@@ -185,6 +189,37 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
       fundingExtremesEntries: 0,
       lastResetTime: Date.now(),
     };
+  }
+
+  /**
+   * Acquire execution lock for a symbol (Redis-based, atomic)
+   * Prevents race condition where two signals enter before DB is updated
+   * Returns true if lock acquired, false if symbol is already being executed
+   */
+  private async acquireExecutionLock(symbol: string): Promise<boolean> {
+    const key = this.EXECUTION_LOCK_PREFIX + symbol;
+    const result = await this.cacheService.client.set(key, Date.now().toString(), {
+      EX: this.EXECUTION_LOCK_TTL_SECONDS,
+      NX: true, // Only set if NOT exists (atomic)
+    });
+    return result !== null;
+  }
+
+  /**
+   * Release execution lock for a symbol
+   */
+  private async releaseExecutionLock(symbol: string): Promise<void> {
+    const key = this.EXECUTION_LOCK_PREFIX + symbol;
+    await this.cacheService.client.del(key);
+  }
+
+  /**
+   * Check if symbol has execution lock (for logging/debugging)
+   */
+  private async hasExecutionLock(symbol: string): Promise<boolean> {
+    const key = this.EXECUTION_LOCK_PREFIX + symbol;
+    const exists = await this.cacheService.client.exists(key);
+    return exists === 1;
   }
 
   /**
@@ -480,6 +515,17 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         );
 
         const positions = await this.positionManager.getActivePositions();
+
+        // CRITICAL: Check if this symbol already has an active position
+        // This prevents duplicate entries for the same symbol
+        if (positions.some((p) => p.symbol === symbol)) {
+          this.logger.debug(
+            `[1M-Entry] ${symbol} ❌ Already has active position, skipping`,
+            'DualStrategyOrchestrator',
+          );
+          return;
+        }
+
         const boxRangeCount = positions.filter((p) => p.strategy_type === 'BOX_RANGE').length;
 
         // Check position limit
@@ -498,6 +544,17 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         const signal = await this.boxRangeSignal.checkEntryOnly(symbol, currentPrice, fundingRate);
 
         if (signal && signal.detected) {
+          // CRITICAL: Acquire Redis execution lock to prevent race condition
+          // This ensures only ONE order per symbol can be executed at a time
+          const lockAcquired = await this.acquireExecutionLock(symbol);
+          if (!lockAcquired) {
+            this.logger.warn(
+              `[1M-Entry] ${symbol} ❌ Execution lock not acquired (another order in progress), skipping`,
+              'DualStrategyOrchestrator',
+            );
+            return;
+          }
+
           this.oneMinuteStats.boxRangeEntries++;
 
           this.logger.log(
@@ -528,6 +585,7 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
             });
           } finally {
             this.processingSymbols.delete(symbol);
+            await this.releaseExecutionLock(symbol);
           }
         }
       }
@@ -542,6 +600,16 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         );
 
         const positions = await this.positionManager.getActivePositions();
+
+        // CRITICAL: Check if this symbol already has an active position
+        if (positions.some((p) => p.symbol === symbol)) {
+          this.logger.debug(
+            `[1M-Entry] ${symbol} ❌ Already has active position, skipping Funding Extremes`,
+            'DualStrategyOrchestrator',
+          );
+          return;
+        }
+
         const hourSwingCount = positions.filter((p) => p.strategy_type === 'HOUR_SWING').length;
 
         // Check position limit
@@ -571,6 +639,16 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         );
 
         if (signal && signal.detected) {
+          // CRITICAL: Acquire Redis execution lock to prevent race condition
+          const lockAcquired = await this.acquireExecutionLock(symbol);
+          if (!lockAcquired) {
+            this.logger.warn(
+              `[1M-Entry] ${symbol} ❌ Execution lock not acquired for Funding Extremes, skipping`,
+              'DualStrategyOrchestrator',
+            );
+            return;
+          }
+
           this.oneMinuteStats.fundingExtremesEntries++;
 
           this.logger.log(
@@ -601,6 +679,7 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
             });
           } finally {
             this.processingSymbols.delete(symbol);
+            await this.releaseExecutionLock(symbol);
           }
         }
       }
@@ -612,6 +691,8 @@ export class DualStrategyOrchestratorService implements OnModuleInit {
         'DualStrategyOrchestrator',
       );
       this.processingSymbols.delete(symbol);
+      // Also release execution lock on error
+      await this.releaseExecutionLock(symbol);
     }
   }
 
