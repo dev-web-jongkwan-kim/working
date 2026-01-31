@@ -1,31 +1,23 @@
 import { Controller, Post, Get, HttpCode, HttpStatus } from '@nestjs/common';
-import { DualStrategyOrchestratorService } from '../services/orchestrator/dual-strategy-orchestrator.service';
-import { LotteryExecutorService } from '../../lottery/lottery-executor.service';
+import { UnifiedOrchestratorService } from '../../unified/orchestrator/unified-orchestrator.service';
 
 @Controller('dual-strategy')
 export class DualStrategyController {
   constructor(
-    private readonly orchestrator: DualStrategyOrchestratorService,
-    private readonly lotteryExecutor: LotteryExecutorService,
+    private readonly orchestrator: UnifiedOrchestratorService,
   ) {}
 
   /**
    * Start the trading system
-   * 1. Lottery strategy first (flash crash hunting)
-   * 2. Then DualStrategy (Cycle Rider, Hour Swing, Box Range)
+   * Strategies: Core Trend (4H) + Squeeze (15m)
    */
   @Post('start')
   @HttpCode(HttpStatus.OK)
   async start(): Promise<{ message: string; status: any }> {
-    // 1. Start Lottery Strategy first
-    await this.lotteryExecutor.start();
-
-    // 2. Then start DualStrategy
     await this.orchestrator.start();
-
     const status = await this.orchestrator.getStatus();
     return {
-      message: 'All trading systems started (Lottery + DualStrategy)',
+      message: 'Trading system started (Core Trend + Squeeze)',
       status,
     };
   }
@@ -36,10 +28,9 @@ export class DualStrategyController {
   @Post('stop')
   @HttpCode(HttpStatus.OK)
   async stop(): Promise<{ message: string }> {
-    await this.lotteryExecutor.stop();
     await this.orchestrator.stop();
     return {
-      message: 'All trading systems stopped (Lottery + DualStrategy)',
+      message: 'Trading system stopped',
     };
   }
 

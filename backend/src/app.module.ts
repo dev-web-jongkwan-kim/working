@@ -5,7 +5,6 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { DatabaseModule } from './common/database/database.module';
 import { LoggingModule } from './common/logging/logging.module';
 import { DualStrategyModule } from './dual-strategy/dual-strategy.module';
-import { LotteryModule } from './lottery/lottery.module';
 import { WebSocketModule } from './websocket/websocket.module';
 import { ApiModule } from './api/api.module';
 import { BacktestModule } from './backtest/backtest.module';
@@ -33,8 +32,7 @@ import { UnifiedModule } from './unified/unified.module';
 
     // Feature modules
     DualStrategyModule,
-    UnifiedModule, // New unified strategy orchestrator
-    LotteryModule,
+    UnifiedModule,
     WebSocketModule,
     ApiModule,
     BacktestModule,

@@ -26,35 +26,31 @@ import { RiskManagerService } from './services/execution/risk-manager.service';
 import { PositionReconcilerService } from './services/execution/position-reconciler.service';
 import { SignalQueueService } from './services/execution/signal-queue.service';
 
-// Orchestrator (legacy - kept for backwards compatibility with existing API)
-import { DualStrategyOrchestratorService } from './services/orchestrator/dual-strategy-orchestrator.service';
-
 // Controller
 import { DualStrategyController } from './controllers/dual-strategy.controller';
 
 // WebSocket
 import { WebSocketModule } from '../websocket/websocket.module';
 
-// Lottery
-import { LotteryModule } from '../lottery/lottery.module';
-
-// NEW: Strategies Module (v2 - Core Trend, Squeeze)
+// Strategies Module (Core Trend, Squeeze)
 import { StrategiesModule } from '../strategies/strategies.module';
 
-// NEW: Live Data Adapter
+// Unified Module (UnifiedOrchestratorService)
+import { UnifiedModule } from '../unified/unified.module';
+
+// Live Data Adapter
 import { LiveDataAdapterAsync } from '../adapters/live/live-data-adapter';
 
 /**
  * Dual Strategy Module
  *
- * Note: Legacy strategies (CYCLE_RIDER, HOUR_SWING, BOX_RANGE) have been removed.
- * Use UnifiedModule with CoreTrendStrategy and SqueezeStrategy instead.
- *
- * This module is kept for:
- * - Data collection services
+ * Provides:
+ * - Data collection services (Redis caching, Binance WebSocket)
  * - Execution services (order execution, position management, risk management)
  * - Regime classification
- * - Backwards compatibility with existing API endpoints
+ * - API endpoints for trading system control
+ *
+ * Strategies: Core Trend (4H) + Squeeze (15m) via UnifiedOrchestratorService
  */
 @Module({
   imports: [
@@ -67,8 +63,8 @@ import { LiveDataAdapterAsync } from '../adapters/live/live-data-adapter';
       RiskEvent,
     ]),
     WebSocketModule,
-    forwardRef(() => LotteryModule),
     StrategiesModule,
+    forwardRef(() => UnifiedModule),
   ],
   providers: [
     // Data services
@@ -90,9 +86,6 @@ import { LiveDataAdapterAsync } from '../adapters/live/live-data-adapter';
     PositionReconcilerService,
     SignalQueueService,
 
-    // Orchestrator (legacy - kept for API compatibility)
-    DualStrategyOrchestratorService,
-
     // Live Data Adapter
     LiveDataAdapterAsync,
   ],
@@ -108,13 +101,10 @@ import { LiveDataAdapterAsync } from '../adapters/live/live-data-adapter';
     // Regime
     MarketRegimeClassifierService,
 
-    // Execution services (used by UnifiedModule)
+    // Execution services
     OrderExecutorService,
     PositionManagerService,
     RiskManagerService,
-
-    // Orchestrator (legacy)
-    DualStrategyOrchestratorService,
 
     // Live Data Adapter
     LiveDataAdapterAsync,
