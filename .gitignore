@@ -69,3 +69,4 @@ backend/*.md
 backend/CHANGELOG.md
 backend/CODE_REVIEW_DETAILED.md
 backend/ISSUES_FIXED.md
+backend/backtest-data/
