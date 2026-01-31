@@ -41,7 +41,7 @@ interface BinanceKline {
 export class DataCollectorService implements OnModuleInit {
   private wsConnections: Map<string, WebSocket> = new Map();
   private symbols: string[] = [];
-  private timeframes: Timeframe[] = ['1m', '5m', '15m', '1h'];
+  private timeframes: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d'];
   private isTestnet: boolean;
   private zeroVolumeCount: Map<string, number> = new Map(); // Track consecutive zero-volume candles
   private readonly MAX_ZERO_VOLUME_CANDLES = 3; // Remove symbol after 3 consecutive zero-volume candles
@@ -202,7 +202,7 @@ export class DataCollectorService implements OnModuleInit {
 
       // CRITICAL: Emit event immediately on candle close (< 0.1s reaction time)
       // This breaks the "1-minute wall" - no more waiting for cron!
-      if (candle.timeframe === '15m' || candle.timeframe === '1h') {
+      if (candle.timeframe === '15m' || candle.timeframe === '1h' || candle.timeframe === '4h' || candle.timeframe === '1d') {
         const event = new CandleClosedEvent(
           candle.symbol,
           candle.timeframe,
@@ -436,15 +436,16 @@ export class DataCollectorService implements OnModuleInit {
 
   /**
    * Get historical candle limit based on timeframe
+   * Note: 1d increased to 250 for EMA 200 calculation (Core Trend strategy)
    */
   private getHistoricalLimit(timeframe: Timeframe): number {
     const limits = {
       '1m': 120,   // 2 hours
       '5m': 120,   // 10 hours
-      '15m': 100,  // 25 hours (enough for CycleRider 50+ requirement)
-      '1h': 100,   // 100 hours (for HourSwing)
-      '4h': 100,   // 400 hours
-      '1d': 50,    // 50 days
+      '15m': 100,  // 25 hours (enough for Squeeze strategy)
+      '1h': 100,   // 100 hours
+      '4h': 150,   // 600 hours (~25 days, for Core Trend)
+      '1d': 250,   // 250 days (for EMA 200 calculation in Core Trend)
     };
     return limits[timeframe] || 100;
   }

@@ -6,9 +6,13 @@ import { getPerformanceSummary, PerformanceSummary } from '@/lib/api/trades';
 export function PerformanceSummaryPanel() {
   const [performance, setPerformance] = useState<PerformanceSummary>({
     totalTrades: 0,
+    winningTrades: 0,
+    losingTrades: 0,
     winRate: 0,
     totalPnl: 0,
     profitFactor: 0,
+    avgWin: 0,
+    avgLoss: 0,
   });
   const [loading, setLoading] = useState(true);
 

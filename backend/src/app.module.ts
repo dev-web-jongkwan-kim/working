@@ -8,6 +8,8 @@ import { DualStrategyModule } from './dual-strategy/dual-strategy.module';
 import { LotteryModule } from './lottery/lottery.module';
 import { WebSocketModule } from './websocket/websocket.module';
 import { ApiModule } from './api/api.module';
+import { BacktestModule } from './backtest/backtest.module';
+import { UnifiedModule } from './unified/unified.module';
 
 @Module({
   imports: [
@@ -31,9 +33,11 @@ import { ApiModule } from './api/api.module';
 
     // Feature modules
     DualStrategyModule,
+    UnifiedModule, // New unified strategy orchestrator
     LotteryModule,
     WebSocketModule,
     ApiModule,
+    BacktestModule,
   ],
   controllers: [],
   providers: [],

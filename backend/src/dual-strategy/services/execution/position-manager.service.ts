@@ -10,8 +10,15 @@ import { DataCacheService } from '../data/data-cache.service';
 import { RiskManagerService } from './risk-manager.service';
 import { BinanceService } from '../data/binance.service';
 import { EventType } from '../../../entities/strategy-log.entity';
-import { CYCLE_RIDER_CONFIG } from '../../constants/cycle-rider.config';
-import { HOUR_SWING_CONFIG } from '../../constants/hour-swing.config';
+
+/**
+ * Legacy strategy trailing stop config (for backwards compatibility)
+ * Note: Legacy strategies are deprecated. Use UnifiedOrchestratorService for CORE_TREND/SQUEEZE.
+ */
+const LEGACY_TRAILING_CONFIG = {
+  enabled: true,
+  distanceAtr: 2.5,
+};
 
 /**
  * Position Manager Service
@@ -436,12 +443,13 @@ export class PositionManagerService {
       return;
     }
 
-    // Cycle Rider / Hour Swing trailing stop
-    const config = position.strategy_type === 'CYCLE_RIDER'
-      ? CYCLE_RIDER_CONFIG.trailing
-      : null;
+    // Legacy strategy trailing stop (CYCLE_RIDER, HOUR_SWING)
+    // Note: These strategies are deprecated - use CORE_TREND/SQUEEZE via UnifiedOrchestratorService
+    const isLegacyStrategy = ['CYCLE_RIDER', 'HOUR_SWING'].includes(position.strategy_type);
+    if (!isLegacyStrategy) return;
 
-    if (!config || !config.enabled) return;
+    const config = LEGACY_TRAILING_CONFIG;
+    if (!config.enabled) return;
 
     // Calculate new trailing stop based on ATR
     // For simplicity, use 1% of price as ATR approximation
@@ -481,17 +489,8 @@ export class PositionManagerService {
     // Only TP/SL should close positions
     return;
 
-    const minutesOpen = (Date.now() - position.entry_time.getTime()) / 1000 / 60;
-
-    // Get strategy config
-    const config = position.strategy_type === 'CYCLE_RIDER'
-      ? CYCLE_RIDER_CONFIG.position
-      : HOUR_SWING_CONFIG.position;
-
-    // Force close after max hold time
-    if (minutesOpen >= config.maxHoldMinutes) {
-      await this.closePosition(position, currentPrice, CloseReason.TIME_BASED, pnl);
-    }
+    // Time-based exits completely disabled - legacy strategies removed
+    // Use UnifiedOrchestratorService for CORE_TREND/SQUEEZE with proper time stops
   }
 
   /**
@@ -549,11 +548,12 @@ export class PositionManagerService {
 
   /**
    * Handle Box Range TP1 - Move SL to breakeven + 0.1%
+   * @deprecated Legacy Box Range strategy removed - kept for backwards compatibility
    */
   private async handleBoxRangeTP1(position: Position, trade: Trade, tp1Price: number): Promise<void> {
     try {
-      const BOX_RANGE_CONFIG = require('../../constants/box-range.config').BOX_RANGE_CONFIG;
-      const breakevenBuffer = BOX_RANGE_CONFIG.slTp.slBreakevenBuffer || 0.001; // 0.1%
+      // Legacy config - Box Range strategy deprecated
+      const breakevenBuffer = 0.001; // 0.1%
 
       const isLong = position.direction === 'LONG';
       const newSL = isLong
@@ -594,11 +594,12 @@ export class PositionManagerService {
 
   /**
    * Enable Box Range trailing stop (0.5 ATR) after TP2
+   * @deprecated Legacy Box Range strategy removed - kept for backwards compatibility
    */
   private async enableBoxRangeTrailingStop(position: Position, trade: Trade, tp2Price: number): Promise<void> {
     try {
-      const BOX_RANGE_CONFIG = require('../../constants/box-range.config').BOX_RANGE_CONFIG;
-      const trailingAtr = BOX_RANGE_CONFIG.slTp.tp2.trailingStopAtr || 0.5;
+      // Legacy config - Box Range strategy deprecated
+      const trailingAtr = 0.5;
 
       // Get ATR from trade metadata
       const atr = trade.metadata?.atr || (position.entry_price * 0.005); // Fallback to 0.5% if no ATR

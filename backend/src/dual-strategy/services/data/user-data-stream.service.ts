@@ -13,7 +13,6 @@ import { SystemEventType } from '../../../entities/system-log.entity';
 import { OrderExecutorService } from '../execution/order-executor.service';
 import { RiskManagerService } from '../execution/risk-manager.service';
 import { BinanceService } from './binance.service';
-import { HourSwingSignalService } from '../hour-swing/hour-swing-signal.service';
 
 /**
  * Binance User Data Stream Event Types
@@ -128,8 +127,6 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
     private readonly orderExecutor: OrderExecutorService,
     @Inject(forwardRef(() => RiskManagerService))
     private readonly riskManager: RiskManagerService,
-    @Inject(forwardRef(() => HourSwingSignalService))
-    private readonly hourSwingSignal: HourSwingSignalService,
   ) {
     this.apiKey = this.configService.get('BINANCE_API_KEY');
     this.apiSecret = this.configService.get('BINANCE_SECRET_KEY');
@@ -1097,16 +1094,7 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
             'UserDataStream',
           );
 
-          // 2026-01-24: Hour Swing Loss-streak Kill Switch
-          // Hour Swing 전략 거래면 손익 결과 기록 (3연패 시 60분 쿨다운)
-          if (position.strategy_type === StrategyType.HOUR_SWING) {
-            const isLoss = finalPnl < 0;
-            this.hourSwingSignal.recordTradeResult(isLoss);
-            this.logger.log(
-              `📊 Hour Swing result recorded: ${isLoss ? '🔴 LOSS' : '🟢 WIN'} (P&L: $${finalPnl.toFixed(2)})`,
-              'UserDataStream',
-            );
-          }
+          // Legacy Hour Swing kill switch removed - strategy deprecated
         } catch (riskError) {
           this.logger.error(
             `Failed to record trade outcome for ${symbol}: ${riskError.message}`,
@@ -1248,15 +1236,7 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
               'UserDataStream',
             );
 
-            // 2026-01-24: Hour Swing Loss-streak Kill Switch (EXTERNAL CLOSE)
-            if (position.strategy_type === StrategyType.HOUR_SWING) {
-              const isLoss = finalPnl < 0;
-              this.hourSwingSignal.recordTradeResult(isLoss);
-              this.logger.log(
-                `📊 Hour Swing result recorded (EXTERNAL): ${isLoss ? '🔴 LOSS' : '🟢 WIN'}`,
-                'UserDataStream',
-              );
-            }
+            // Legacy Hour Swing kill switch removed - strategy deprecated
           } catch (riskError) {
             this.logger.error(
               `Failed to record trade outcome for ${symbol}: ${riskError.message}`,
@@ -1418,15 +1398,7 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.riskManager.recordTradeOutcome(pnl, symbol);
 
-      // 2026-01-24: Hour Swing Loss-streak Kill Switch (SYNC)
-      if (position.strategy_type === StrategyType.HOUR_SWING) {
-        const isLoss = pnl < 0;
-        this.hourSwingSignal.recordTradeResult(isLoss);
-        this.logger.log(
-          `📊 Hour Swing result recorded (SYNC): ${isLoss ? '🔴 LOSS' : '🟢 WIN'}`,
-          'UserDataStream',
-        );
-      }
+      // Legacy Hour Swing kill switch removed - strategy deprecated
     } catch (error) {
       this.logger.error(
         `Failed to record trade outcome for ${symbol}: ${error.message}`,

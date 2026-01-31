@@ -195,6 +195,54 @@ export class DataCacheService implements OnModuleInit {
   }
 
   /**
+   * Store funding rate history
+   */
+  async addFundingHistory(symbol: string, rate: number): Promise<void> {
+    const key = `funding_history:${symbol}`;
+    try {
+      // Push to list (max 200 items for percentile calculation)
+      await this.client.rPush(key, rate.toString());
+      await this.client.lTrim(key, -200, -1);
+      await this.client.expire(key, 7 * 24 * 3600); // 7 days TTL
+    } catch (error) {
+      this.logger.error(`Failed to add funding history: ${error.message}`, error.stack, 'DataCacheService');
+    }
+  }
+
+  /**
+   * Get funding rate history
+   */
+  async getFundingHistory(symbol: string, count: number = 200): Promise<number[]> {
+    const key = `funding_history:${symbol}`;
+    try {
+      const data = await this.client.lRange(key, -count, -1);
+      return data.map((r) => parseFloat(r));
+    } catch (error) {
+      this.logger.error(`Failed to get funding history: ${error.message}`, error.stack, 'DataCacheService');
+      return [];
+    }
+  }
+
+  /**
+   * Initialize funding history from API data
+   */
+  async initializeFundingHistory(symbol: string, rates: number[]): Promise<void> {
+    const key = `funding_history:${symbol}`;
+    try {
+      // Clear existing
+      await this.client.del(key);
+      // Add all rates
+      if (rates.length > 0) {
+        const stringRates = rates.map((r) => r.toString());
+        await this.client.rPush(key, stringRates);
+        await this.client.expire(key, 7 * 24 * 3600);
+      }
+    } catch (error) {
+      this.logger.error(`Failed to initialize funding history: ${error.message}`, error.stack, 'DataCacheService');
+    }
+  }
+
+  /**
    * Clear all cache for a symbol
    */
   async clearSymbolCache(symbol: string): Promise<void> {

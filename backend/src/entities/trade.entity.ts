@@ -1,9 +1,14 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
 export enum StrategyType {
+  // Legacy strategies (deprecated)
   CYCLE_RIDER = 'CYCLE_RIDER',
   HOUR_SWING = 'HOUR_SWING',
   BOX_RANGE = 'BOX_RANGE',
+
+  // New strategies (v2)
+  CORE_TREND = 'CORE_TREND',
+  SQUEEZE = 'SQUEEZE',
 }
 
 export enum TradeDirection {

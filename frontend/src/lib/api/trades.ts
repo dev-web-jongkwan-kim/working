@@ -98,6 +98,17 @@ export interface DailyStats {
   totalPnlPercent: number;
 }
 
+export interface PerformanceSummary {
+  totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number;
+  totalPnl: number;
+  profitFactor: number;
+  avgWin: number;
+  avgLoss: number;
+}
+
 export async function getDailyStats(): Promise<DailyStats[]> {
   const res = await fetch(`${API_URL}/api/trades/stats/daily`);
   return res.json();

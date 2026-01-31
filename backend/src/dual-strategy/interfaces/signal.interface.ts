@@ -14,6 +14,8 @@ export interface TradingSignal {
   confidence: number;
   riskRewardRatio?: number;
   marketRegime?: string;
+  marginUsd?: number;
+  leverage?: number;
   metadata?: {
     atr?: number;
     rsi?: number;

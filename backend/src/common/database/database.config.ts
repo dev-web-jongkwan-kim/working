@@ -11,6 +11,9 @@ import { DailyPerformance } from '../../entities/daily-performance.entity';
 import { LotteryOrder } from '../../lottery/entities/lottery-order.entity';
 import { LotterySelectionHistory } from '../../lottery/entities/lottery-selection-history.entity';
 import { LotteryPerformance } from '../../lottery/entities/lottery-performance.entity';
+import { ManualTrade } from '../../entities/manual-trade.entity';
+import { BacktestRun } from '../../backtest/entities/backtest-run.entity';
+import { BacktestTrade } from '../../backtest/entities/backtest-trade.entity';
 
 config();
 
@@ -33,6 +36,9 @@ export const dataSourceOptions: DataSourceOptions = {
     LotteryOrder,
     LotterySelectionHistory,
     LotteryPerformance,
+    ManualTrade,
+    BacktestRun,
+    BacktestTrade,
   ],
   migrations: ['dist/migrations/*.js'],
   synchronize: process.env.NODE_ENV === 'development', // Auto-sync in dev

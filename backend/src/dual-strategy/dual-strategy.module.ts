@@ -19,26 +19,6 @@ import { BinanceService } from './services/data/binance.service';
 // Regime
 import { MarketRegimeClassifierService } from './services/regime/market-regime-classifier.service';
 
-// Strategy A - Cycle Rider
-import { AccumulationDetectorService } from './services/cycle-rider/accumulation-detector.service';
-import { DistributionDetectorService } from './services/cycle-rider/distribution-detector.service';
-import { DivergenceAnalyzerService } from './services/cycle-rider/divergence-analyzer.service';
-import { VolumeClimaxDetectorService } from './services/cycle-rider/volume-climax-detector.service';
-import { SqueezeDetectorService } from './services/cycle-rider/squeeze-detector.service';
-import { CycleRiderSignalService } from './services/cycle-rider/cycle-rider-signal.service';
-
-// Strategy B - Hour Swing
-import { MtfAlignmentAnalyzerService } from './services/hour-swing/mtf-alignment-analyzer.service';
-import { RelativeStrengthRankerService } from './services/hour-swing/relative-strength-ranker.service';
-import { FundingExtremesDetectorService } from './services/hour-swing/funding-extremes-detector.service';
-import { HourSwingSignalService } from './services/hour-swing/hour-swing-signal.service';
-
-// Strategy C - Box Range
-import { BoxDetectorService } from './services/box-range/box-detector.service';
-import { BoxEntryAnalyzerService } from './services/box-range/box-entry-analyzer.service';
-import { BoxRangeSignalService } from './services/box-range/box-range-signal.service';
-import { BoxBreakoutMonitorService } from './services/box-range/box-breakout-monitor.service';
-
 // Execution
 import { OrderExecutorService } from './services/execution/order-executor.service';
 import { PositionManagerService } from './services/execution/position-manager.service';
@@ -46,7 +26,7 @@ import { RiskManagerService } from './services/execution/risk-manager.service';
 import { PositionReconcilerService } from './services/execution/position-reconciler.service';
 import { SignalQueueService } from './services/execution/signal-queue.service';
 
-// Orchestrator
+// Orchestrator (legacy - kept for backwards compatibility with existing API)
 import { DualStrategyOrchestratorService } from './services/orchestrator/dual-strategy-orchestrator.service';
 
 // Controller
@@ -58,6 +38,24 @@ import { WebSocketModule } from '../websocket/websocket.module';
 // Lottery
 import { LotteryModule } from '../lottery/lottery.module';
 
+// NEW: Strategies Module (v2 - Core Trend, Squeeze)
+import { StrategiesModule } from '../strategies/strategies.module';
+
+// NEW: Live Data Adapter
+import { LiveDataAdapterAsync } from '../adapters/live/live-data-adapter';
+
+/**
+ * Dual Strategy Module
+ *
+ * Note: Legacy strategies (CYCLE_RIDER, HOUR_SWING, BOX_RANGE) have been removed.
+ * Use UnifiedModule with CoreTrendStrategy and SqueezeStrategy instead.
+ *
+ * This module is kept for:
+ * - Data collection services
+ * - Execution services (order execution, position management, risk management)
+ * - Regime classification
+ * - Backwards compatibility with existing API endpoints
+ */
 @Module({
   imports: [
     TypeOrmModule.forFeature([
@@ -70,9 +68,10 @@ import { LotteryModule } from '../lottery/lottery.module';
     ]),
     WebSocketModule,
     forwardRef(() => LotteryModule),
+    StrategiesModule,
   ],
   providers: [
-    // Data
+    // Data services
     DataCacheService,
     DataCollectorService,
     SymbolFetcherService,
@@ -84,26 +83,6 @@ import { LotteryModule } from '../lottery/lottery.module';
     // Regime
     MarketRegimeClassifierService,
 
-    // Strategy A
-    AccumulationDetectorService,
-    DistributionDetectorService,
-    DivergenceAnalyzerService,
-    VolumeClimaxDetectorService,
-    SqueezeDetectorService,
-    CycleRiderSignalService,
-
-    // Strategy B
-    MtfAlignmentAnalyzerService,
-    RelativeStrengthRankerService,
-    FundingExtremesDetectorService,
-    HourSwingSignalService,
-
-    // Strategy C
-    BoxDetectorService,
-    BoxEntryAnalyzerService,
-    BoxRangeSignalService,
-    BoxBreakoutMonitorService,
-
     // Execution
     OrderExecutorService,
     PositionManagerService,
@@ -111,15 +90,34 @@ import { LotteryModule } from '../lottery/lottery.module';
     PositionReconcilerService,
     SignalQueueService,
 
-    // Orchestrator
+    // Orchestrator (legacy - kept for API compatibility)
     DualStrategyOrchestratorService,
+
+    // Live Data Adapter
+    LiveDataAdapterAsync,
   ],
   controllers: [DualStrategyController],
   exports: [
-    DualStrategyOrchestratorService,
-    BinanceService,
+    // Data services
+    DataCacheService,
+    DataCollectorService,
     SymbolFetcherService,
     ExchangeInfoService,
+    BinanceService,
+
+    // Regime
+    MarketRegimeClassifierService,
+
+    // Execution services (used by UnifiedModule)
+    OrderExecutorService,
+    PositionManagerService,
+    RiskManagerService,
+
+    // Orchestrator (legacy)
+    DualStrategyOrchestratorService,
+
+    // Live Data Adapter
+    LiveDataAdapterAsync,
   ],
 })
 export class DualStrategyModule {}
